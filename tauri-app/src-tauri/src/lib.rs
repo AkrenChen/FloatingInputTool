@@ -1,4 +1,6 @@
 mod config;
+mod draft;
+mod storage;
 
 use config::{
     default_app_config, load_app_config, normalize_targets, sanitize_custom_theme,
@@ -6,23 +8,35 @@ use config::{
     SaveShortcutMode, ThemeMode, DEFAULT_HIDE_HOTKEY, DEFAULT_HOTKEY, DEFAULT_NEXT_TARGET_HOTKEY,
     DEFAULT_NOTE_TEMPLATE,
 };
+use draft::{load_draft, save_draft, DraftSnapshot};
 use std::sync::Mutex;
 use std::{fs, path::Path, str::FromStr};
-use std::{thread, time::Duration};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
+use storage::atomic_write_string;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime, State, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, WindowEvent, Wry,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, Runtime, State,
+    WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Wry,
 };
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::POINT;
 #[cfg(windows)]
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
+};
+#[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 #[cfg(windows)]
-use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    BringWindowToTop, GetCursorPos, GetSystemMetrics, SetForegroundWindow, ShowWindowAsync,
+    SM_REMOTESESSION, SW_RESTORE,
+};
 
 const MENU_ID_SHOW: &str = "show";
 const MENU_ID_SETTINGS: &str = "settings";
@@ -39,10 +53,12 @@ const EVENT_THEME_MODE_CHANGED: &str = "theme-mode-changed";
 const EVENT_APP_CONFIG_CHANGED: &str = "app-config-changed";
 const EVENT_MAIN_WINDOW_MODE_CHANGED: &str = "main-window-mode-changed";
 const EVENT_FOCUS_MAIN_EDITOR: &str = "focus-main-editor";
+const EVENT_NATIVE_BACKDROP_CHANGED: &str = "native-backdrop-changed";
 const AUTO_DOCK_SETTLE_MS: u64 = 180;
 const WINDOW_BOUNDS_ANIMATION_MS: u64 = 120;
 const WINDOW_BOUNDS_ANIMATION_STEPS: u32 = 10;
 const WINDOW_BOUNDS_ANIMATION_PAINT_SETTLE_MS: u64 = 24;
+const DRAFT_SAVE_DEBOUNCE_MS: u64 = 150;
 
 struct ThemeMenuItems {
     follow_system: CheckMenuItem<Wry>,
@@ -98,10 +114,21 @@ struct AppState {
     config: Mutex<AppConfig>,
     tray_menu_items: TrayMenuItems,
     active_hotkeys: Mutex<ActiveHotkeys>,
+    hotkey_update_lock: Mutex<()>,
+    runtime_warnings: Mutex<Vec<String>>,
+    draft: Mutex<DraftSnapshot>,
+    draft_save_generation: Mutex<u64>,
+    native_backdrop: Mutex<NativeBackdropState>,
     main_window_state: Mutex<MainWindowRuntimeState>,
     auto_dock_generation: Mutex<u64>,
     manual_drag_in_progress: Mutex<bool>,
     auto_dock_suppressed_until_ms: Mutex<u128>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NativeBackdropState {
+    main: bool,
+    settings: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +205,22 @@ struct ThemeModeChangedPayload {
 struct HotkeyUpdateResponse {
     config: AppConfig,
     warning: Option<String>,
+    active_hotkey: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HotkeyRuntimeStatus {
+    capture: Option<String>,
+    hide: Option<String>,
+    next_target: Option<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeBackdropStatus {
+    available: bool,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -194,6 +237,132 @@ fn get_app_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
         .lock()
         .map(|config| config.clone())
         .map_err(|error| format!("failed to read app state: {error}"))
+}
+
+#[tauri::command]
+fn get_hotkey_runtime_status(state: State<'_, AppState>) -> Result<HotkeyRuntimeStatus, String> {
+    let active_hotkeys = state
+        .active_hotkeys
+        .lock()
+        .map_err(|error| format!("failed to lock active hotkey state: {error}"))?
+        .clone();
+    let warnings = state
+        .runtime_warnings
+        .lock()
+        .map_err(|error| format!("failed to lock runtime warnings: {error}"))?
+        .clone();
+
+    Ok(HotkeyRuntimeStatus {
+        capture: active_hotkeys.capture.map(|hotkey| hotkey.accelerator),
+        hide: active_hotkeys.hide.map(|hotkey| hotkey.accelerator),
+        next_target: active_hotkeys.next_target.map(|hotkey| hotkey.accelerator),
+        warnings,
+    })
+}
+
+#[tauri::command]
+fn get_draft(state: State<'_, AppState>) -> Result<DraftSnapshot, String> {
+    state
+        .draft
+        .lock()
+        .map_err(|error| format!("failed to lock draft state: {error}"))
+        .map(|draft| draft.clone())
+}
+
+#[tauri::command]
+fn get_native_backdrop_status(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<NativeBackdropStatus, String> {
+    let backdrop = state
+        .native_backdrop
+        .lock()
+        .map_err(|error| format!("failed to lock native backdrop state: {error}"))?;
+    let available = match window.label() {
+        WINDOW_LABEL_SETTINGS => backdrop.settings,
+        _ => backdrop.main,
+    };
+    Ok(NativeBackdropStatus { available })
+}
+
+#[tauri::command]
+fn update_draft(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    draft: DraftSnapshot,
+) -> Result<(), String> {
+    *state
+        .draft
+        .lock()
+        .map_err(|error| format!("failed to lock draft state: {error}"))? = draft;
+    let generation = {
+        let mut generation = state
+            .draft_save_generation
+            .lock()
+            .map_err(|error| format!("failed to lock draft save generation: {error}"))?;
+        *generation += 1;
+        *generation
+    };
+
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(DRAFT_SAVE_DEBOUNCE_MS));
+        let state = app.state::<AppState>();
+        let current_generation = match state.draft_save_generation.lock() {
+            Ok(generation) => *generation,
+            Err(error) => {
+                log::warn!("failed to lock draft save generation: {error}");
+                return;
+            }
+        };
+        if generation != current_generation {
+            return;
+        }
+        if let Err(error) = flush_draft_inner(&app, &state) {
+            log::warn!("debounced draft save failed: {error}");
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn flush_draft(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    flush_draft_inner(&app, &state)
+}
+
+#[tauri::command]
+fn clear_draft(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    clear_draft_inner(&app, &state)
+}
+
+fn flush_draft_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
+    let draft = state
+        .draft
+        .lock()
+        .map_err(|error| format!("failed to lock draft state: {error}"))?
+        .clone();
+    save_draft(app, &draft)
+}
+
+fn clear_draft_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let mut generation = state
+            .draft_save_generation
+            .lock()
+            .map_err(|error| format!("failed to lock draft save generation: {error}"))?;
+        *generation += 1;
+    }
+    let empty_draft = DraftSnapshot::default();
+    *state
+        .draft
+        .lock()
+        .map_err(|error| format!("failed to lock draft state: {error}"))? = empty_draft.clone();
+    save_draft(app, &empty_draft)
 }
 
 #[tauri::command]
@@ -407,31 +576,125 @@ fn set_action_hotkey<R: Runtime>(
     action: GlobalHotkeyAction,
     hotkey: String,
 ) -> Result<HotkeyUpdateResponse, String> {
+    let _update_guard = state
+        .hotkey_update_lock
+        .lock()
+        .map_err(|error| format!("failed to lock hotkey update state: {error}"))?;
     let normalized_hotkey = hotkey.trim().to_string();
-    let mut config = state
+    let current_config = state
         .config
         .lock()
-        .map_err(|error| format!("failed to lock app state: {error}"))?;
+        .map_err(|error| format!("failed to lock app state: {error}"))?
+        .clone();
 
-    match action {
-        GlobalHotkeyAction::Capture => config.hotkey = normalized_hotkey.clone(),
-        GlobalHotkeyAction::Hide => config.hide_hotkey = normalized_hotkey.clone(),
-        GlobalHotkeyAction::NextTarget => config.next_target_hotkey = normalized_hotkey.clone(),
+    let current_active = state
+        .active_hotkeys
+        .lock()
+        .map_err(|error| format!("failed to lock active hotkey state: {error}"))?
+        .get(action)
+        .cloned();
+
+    let requested = match RegisteredHotkey::from_accelerator(&normalized_hotkey) {
+        Ok(requested) => requested,
+        Err(error) => {
+            return Ok(HotkeyUpdateResponse {
+                config: current_config,
+                warning: Some(error),
+                active_hotkey: current_active.map(|hotkey| hotkey.accelerator),
+            });
+        }
+    };
+
+    if current_active.as_ref().map(|hotkey| hotkey.id) == Some(requested.id) {
+        let mut next_config = current_config.clone();
+        set_configured_hotkey(&mut next_config, action, normalized_hotkey.clone());
+        save_app_config(app, &next_config)?;
+        *state
+            .config
+            .lock()
+            .map_err(|error| format!("failed to lock app state: {error}"))? = next_config.clone();
+        return Ok(HotkeyUpdateResponse {
+            config: next_config,
+            warning: None,
+            active_hotkey: Some(normalized_hotkey),
+        });
     }
 
-    save_app_config(&app, &config)?;
-    let next_config = config.clone();
-    drop(config);
+    {
+        let active_hotkeys = state
+            .active_hotkeys
+            .lock()
+            .map_err(|error| format!("failed to lock active hotkey state: {error}"))?;
+        if let Some(conflicting_action) = active_hotkeys.action_for_hotkey_id(requested.id) {
+            return Ok(HotkeyUpdateResponse {
+                config: current_config,
+                warning: Some(format!(
+                    "{} hotkey conflicts with the active {} hotkey.",
+                    hotkey_action_label(action),
+                    hotkey_action_label(conflicting_action)
+                )),
+                active_hotkey: current_active.map(|hotkey| hotkey.accelerator),
+            });
+        }
+    }
 
-    let warning = match activate_hotkey(app, state, action, &normalized_hotkey) {
-        Ok(()) => None,
-        Err(error) => Some(error),
-    };
+    if let Err(error) = app.global_shortcut().register(normalized_hotkey.as_str()) {
+        return Ok(HotkeyUpdateResponse {
+            config: current_config,
+            warning: Some(format!(
+                "{} hotkey could not be activated. It may be invalid or already in use. {error}",
+                hotkey_action_label(action)
+            )),
+            active_hotkey: current_active.map(|hotkey| hotkey.accelerator),
+        });
+    }
+
+    let mut next_config = current_config.clone();
+    set_configured_hotkey(&mut next_config, action, normalized_hotkey.clone());
+    if let Err(error) = save_app_config(app, &next_config) {
+        let _ = app.global_shortcut().unregister(normalized_hotkey.as_str());
+        return Err(error);
+    }
+
+    if let Some(previous_hotkey) = current_active.as_ref() {
+        if let Err(error) = app
+            .global_shortcut()
+            .unregister(previous_hotkey.accelerator.as_str())
+        {
+            let _ = app.global_shortcut().unregister(normalized_hotkey.as_str());
+            let _ = save_app_config(app, &current_config);
+            return Err(format!(
+                "failed to deactivate previous {} hotkey: {error}",
+                hotkey_action_label(action)
+            ));
+        }
+    }
+
+    state
+        .active_hotkeys
+        .lock()
+        .map_err(|error| format!("failed to lock active hotkey state: {error}"))?
+        .set(action, Some(requested));
+    *state
+        .config
+        .lock()
+        .map_err(|error| format!("failed to lock app state: {error}"))? = next_config.clone();
+    app.emit(EVENT_APP_CONFIG_CHANGED, next_config.clone())
+        .map_err(|error| format!("failed to emit app config change: {error}"))?;
 
     Ok(HotkeyUpdateResponse {
         config: next_config,
-        warning,
+        warning: None,
+        active_hotkey: Some(normalized_hotkey),
     })
+}
+
+fn set_configured_hotkey(config: &mut AppConfig, action: GlobalHotkeyAction, hotkey: String) {
+    match action {
+        GlobalHotkeyAction::Capture => config.hotkey = hotkey,
+        GlobalHotkeyAction::Hide => config.hide_hotkey = hotkey,
+        GlobalHotkeyAction::NextTarget => config.next_target_hotkey = hotkey,
+    }
 }
 
 #[tauri::command]
@@ -481,7 +744,7 @@ fn set_note_template(
 }
 
 #[tauri::command]
-fn save_note(state: State<'_, AppState>, note_text: String) -> Result<(), String> {
+fn save_note(app: AppHandle, state: State<'_, AppState>, note_text: String) -> Result<(), String> {
     if note_text.trim().is_empty() {
         return Err(String::from("note content cannot be empty"));
     }
@@ -494,7 +757,11 @@ fn save_note(state: State<'_, AppState>, note_text: String) -> Result<(), String
 
     let target_file_path = active_target_file_path(&config);
     let note_block = format_note_block(&note_text, &config.note_template);
-    prepend_to_file(&target_file_path, &note_block)
+    prepend_to_file(&target_file_path, &note_block)?;
+    if let Err(error) = clear_draft_inner(&app, &state) {
+        log::error!("note saved but persisted draft could not be cleared: {error}");
+    }
+    Ok(())
 }
 
 fn active_target_file_path(config: &AppConfig) -> String {
@@ -836,55 +1103,163 @@ fn sync_language_menu_items(
     Ok(())
 }
 
-fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let state = app.state::<AppState>();
-    if let Err(error) = restore_main_window_to_normal(app, &state) {
-        log::warn!("{error}");
+    restore_main_window_to_normal(app, &state)?;
+
+    if let Some(settings_window) = app.get_webview_window(WINDOW_LABEL_SETTINGS) {
+        if settings_window.is_visible().unwrap_or(false) {
+            settings_window
+                .hide()
+                .map_err(|error| format!("failed to hide Settings before capture: {error}"))?;
+        }
     }
 
-    if let Some(window) = app.get_webview_window(WINDOW_LABEL_MAIN) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        let _ = app.emit(EVENT_FOCUS_MAIN_EDITOR, ());
+    let window = app
+        .get_webview_window(WINDOW_LABEL_MAIN)
+        .ok_or_else(|| String::from("main window is missing"))?;
+    window
+        .set_enabled(true)
+        .map_err(|error| format!("failed to enable main window: {error}"))?;
+    window
+        .show()
+        .map_err(|error| format!("failed to show main window: {error}"))?;
+    window
+        .unminimize()
+        .map_err(|error| format!("failed to restore main window: {error}"))?;
+    update_native_backdrop(app, &window);
+    focus_main_window(&window)?;
+    app.emit(EVENT_FOCUS_MAIN_EDITOR, ())
+        .map_err(|error| format!("failed to focus main editor: {error}"))?;
+
+    let app_handle = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(40));
+        if let Some(window) = app_handle.get_webview_window(WINDOW_LABEL_MAIN) {
+            if let Err(error) = focus_main_window(&window) {
+                log::warn!("delayed main window focus failed: {error}");
+            }
+            if let Err(error) = app_handle.emit(EVENT_FOCUS_MAIN_EDITOR, ()) {
+                log::warn!("delayed main editor focus failed: {error}");
+            }
+        }
+    });
+
+    Ok(())
+}
+
+fn focus_main_window<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let hwnd = window
+            .hwnd()
+            .map_err(|error| format!("failed to resolve main window handle: {error}"))?;
+        unsafe {
+            let raw_hwnd = hwnd.0 as _;
+            let _ = ShowWindowAsync(raw_hwnd, SW_RESTORE);
+            let _ = BringWindowToTop(raw_hwnd);
+            if SetForegroundWindow(raw_hwnd) == 0 {
+                log::warn!("Windows declined SetForegroundWindow for the main window");
+            }
+        }
     }
+
+    window
+        .set_focus()
+        .map_err(|error| format!("failed to focus main window: {error}"))
+}
+
+fn update_native_backdrop<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>) {
+    let available = apply_native_backdrop(window);
+    apply_native_corner_preference(window, true);
+    let state = app.state::<AppState>();
+    match state.native_backdrop.lock() {
+        Ok(mut backdrop) => match window.label() {
+            WINDOW_LABEL_SETTINGS => backdrop.settings = available,
+            _ => backdrop.main = available,
+        },
+        Err(error) => log::warn!("failed to lock native backdrop state: {error}"),
+    }
+    if let Err(error) = window.emit(
+        EVENT_NATIVE_BACKDROP_CHANGED,
+        NativeBackdropStatus { available },
+    ) {
+        log::warn!("failed to emit native backdrop status: {error}");
+    }
+}
+
+#[cfg(windows)]
+fn apply_native_corner_preference<R: Runtime>(window: &WebviewWindow<R>, rounded: bool) {
+    let hwnd = match window.hwnd() {
+        Ok(hwnd) => hwnd,
+        Err(error) => {
+            log::warn!(
+                "failed to resolve window handle for native corners on {}: {error}",
+                window.label()
+            );
+            return;
+        }
+    };
+    let preference = if rounded {
+        DWMWCP_ROUND
+    } else {
+        DWMWCP_DONOTROUND
+    };
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            hwnd.0 as _,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            std::ptr::from_ref(&preference).cast(),
+            std::mem::size_of_val(&preference) as u32,
+        )
+    };
+    if result < 0 {
+        log::warn!(
+            "native corner preference unavailable for window {}: HRESULT {result:#010x}",
+            window.label()
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_native_corner_preference<R: Runtime>(_window: &WebviewWindow<R>, _rounded: bool) {}
+
+#[cfg(windows)]
+fn apply_native_backdrop<R: Runtime>(window: &WebviewWindow<R>) -> bool {
+    let is_remote_session = unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 };
+    if is_remote_session {
+        let _ = window_vibrancy::clear_acrylic(window);
+        log::info!(
+            "native Acrylic disabled for remote session window {}",
+            window.label()
+        );
+        return false;
+    }
+
+    let _ = window_vibrancy::clear_acrylic(window);
+    match window_vibrancy::apply_acrylic(window, None) {
+        Ok(()) => {
+            log::info!("native Acrylic enabled for window {}", window.label());
+            true
+        }
+        Err(error) => {
+            log::warn!(
+                "native Acrylic unavailable for window {}: {error}",
+                window.label()
+            );
+            false
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_native_backdrop<R: Runtime>(_window: &WebviewWindow<R>) -> bool {
+    false
 }
 
 fn open_settings<R: Runtime>(app: &AppHandle<R>) {
     if let Err(error) = open_or_focus_settings_window(app) {
         log::error!("{error}");
-    }
-}
-
-fn toggle_main_window<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(settings_window) = app.get_webview_window(WINDOW_LABEL_SETTINGS) {
-        if settings_window.is_visible().unwrap_or(false) {
-            let _ = settings_window.show();
-            let _ = settings_window.unminimize();
-            let _ = settings_window.set_focus();
-            return;
-        }
-    }
-
-    if let Some(window) = app.get_webview_window(WINDOW_LABEL_MAIN) {
-        let state = app.state::<AppState>();
-        let mode = state
-            .main_window_state
-            .lock()
-            .map(|runtime_state| runtime_state.mode)
-            .unwrap_or(MainWindowMode::Normal);
-
-        if mode != MainWindowMode::Normal {
-            show_main_window(app);
-            return;
-        }
-
-        let is_visible = window.is_visible().unwrap_or(false);
-        if is_visible {
-            let _ = window.hide();
-        } else {
-            show_main_window(app);
-        }
     }
 }
 
@@ -899,7 +1274,11 @@ fn handle_global_hotkey<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut) {
     };
 
     match action {
-        Some(GlobalHotkeyAction::Capture) => toggle_main_window(app),
+        Some(GlobalHotkeyAction::Capture) => {
+            if let Err(error) = show_main_window(app) {
+                log::warn!("{error}");
+            }
+        }
         Some(GlobalHotkeyAction::Hide) => {
             if let Err(error) = hide_or_dock_main_window_inner(app) {
                 log::warn!("{error}");
@@ -928,19 +1307,17 @@ fn attach_settings_window_events<R: Runtime>(
     settings_window: &WebviewWindow<R>,
 ) {
     let app_handle = app.clone();
-    settings_window.on_window_event(move |event| {
-        if matches!(event, WindowEvent::Destroyed) {
-            enable_main_window(&app_handle);
-        }
+    settings_window.on_window_event(move |event| match event {
+        WindowEvent::Destroyed => enable_main_window(&app_handle),
+        _ => {}
     });
 }
 
 fn attach_main_window_events<R: Runtime>(app: &AppHandle<R>, main_window: &WebviewWindow<R>) {
     let app_handle = app.clone();
-    main_window.on_window_event(move |event| {
-        if matches!(event, WindowEvent::Moved(_)) {
-            schedule_main_window_auto_dock(&app_handle);
-        }
+    main_window.on_window_event(move |event| match event {
+        WindowEvent::Moved(_) => schedule_main_window_auto_dock(&app_handle),
+        _ => {}
     });
 }
 
@@ -948,7 +1325,7 @@ fn build_settings_window<R: Runtime>(
     app: &AppHandle<R>,
     _main_window: &WebviewWindow<R>,
 ) -> Result<WebviewWindow<R>, String> {
-    WebviewWindowBuilder::new(
+    let window = WebviewWindowBuilder::new(
         app,
         WINDOW_LABEL_SETTINGS,
         WebviewUrl::App("index.html".into()),
@@ -966,11 +1343,13 @@ fn build_settings_window<R: Runtime>(
     .focused(true)
     .center()
     .build()
-    .map_err(|error| format!("failed to create Settings window: {error}"))
+    .map_err(|error| format!("failed to create Settings window: {error}"))?;
+    update_native_backdrop(app, &window);
+    Ok(window)
 }
 
 fn open_or_focus_settings_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    show_main_window(app);
+    show_main_window(app)?;
 
     let main_window = app
         .get_webview_window(WINDOW_LABEL_MAIN)
@@ -1004,7 +1383,11 @@ fn open_or_focus_settings_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
 
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
-        MENU_ID_SHOW => show_main_window(app),
+        MENU_ID_SHOW => {
+            if let Err(error) = show_main_window(app) {
+                log::error!("{error}");
+            }
+        }
         MENU_ID_SETTINGS => open_settings(app),
         MENU_ID_THEME_FOLLOW_SYSTEM => {
             if let Err(error) = set_theme_mode(
@@ -1050,7 +1433,13 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 log::error!("{error}");
             }
         }
-        MENU_ID_QUIT => app.exit(0),
+        MENU_ID_QUIT => {
+            let state = app.state::<AppState>();
+            if let Err(error) = flush_draft_inner(app, &state) {
+                log::error!("failed to flush draft before exit: {error}");
+            }
+            app.exit(0);
+        }
         _ => {}
     }
 }
@@ -1170,7 +1559,9 @@ fn create_tray(app: &AppHandle, config: &AppConfig) -> Result<TrayMenuItems, Str
                 ..
             } = event
             {
-                show_main_window(tray.app_handle());
+                if let Err(error) = show_main_window(tray.app_handle()) {
+                    log::error!("{error}");
+                }
             }
         })
         .build(app)
@@ -1203,63 +1594,6 @@ fn normalize_target_file_path(target_file_path: &str) -> Result<String, String> 
     Ok(format!("{normalized}.md"))
 }
 
-fn activate_hotkey<R: Runtime>(
-    app: &AppHandle<R>,
-    state: &State<'_, AppState>,
-    action: GlobalHotkeyAction,
-    requested_hotkey: &str,
-) -> Result<(), String> {
-    let normalized_hotkey = requested_hotkey.trim();
-    if normalized_hotkey.is_empty() {
-        return Err(format!(
-            "{} hotkey was saved, but it is empty. The previous working hotkey will stay active.",
-            hotkey_action_label(action)
-        ));
-    }
-
-    let mut active_hotkeys = state
-        .active_hotkeys
-        .lock()
-        .map_err(|error| format!("failed to lock active hotkey state: {error}"))?;
-
-    if active_hotkeys
-        .get(action)
-        .map(|hotkey| hotkey.accelerator.as_str())
-        == Some(normalized_hotkey)
-    {
-        return Ok(());
-    }
-
-    let previous_hotkey = active_hotkeys.get(action).cloned();
-    if let Some(previous_hotkey_value) = previous_hotkey.as_ref() {
-        let _ = app
-            .global_shortcut()
-            .unregister(previous_hotkey_value.accelerator.as_str());
-    }
-
-    match app.global_shortcut().register(normalized_hotkey) {
-        Ok(()) => {
-            active_hotkeys.set(
-                action,
-                Some(RegisteredHotkey::from_accelerator(normalized_hotkey)?),
-            );
-            Ok(())
-        }
-        Err(error) => {
-            if let Some(previous_hotkey_value) = previous_hotkey.as_ref() {
-                let _ = app
-                    .global_shortcut()
-                    .register(previous_hotkey_value.accelerator.as_str());
-            }
-            active_hotkeys.set(action, previous_hotkey);
-            Err(format!(
-        "{} hotkey was saved, but it could not be activated. It may be invalid or already in use. {error}",
-        hotkey_action_label(action)
-      ))
-        }
-    }
-}
-
 fn register_startup_hotkeys<R: Runtime>(app: &AppHandle<R>, config: &AppConfig) -> ActiveHotkeys {
     ActiveHotkeys {
         capture: register_startup_hotkey(
@@ -1280,6 +1614,45 @@ fn register_startup_hotkeys<R: Runtime>(app: &AppHandle<R>, config: &AppConfig) 
             &config.next_target_hotkey,
             Some(DEFAULT_NEXT_TARGET_HOTKEY),
         ),
+    }
+}
+
+fn repair_startup_hotkey_config(
+    config: &mut AppConfig,
+    active_hotkeys: &ActiveHotkeys,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for action in [
+        GlobalHotkeyAction::Capture,
+        GlobalHotkeyAction::Hide,
+        GlobalHotkeyAction::NextTarget,
+    ] {
+        let configured = configured_hotkey(config, action).to_string();
+        match active_hotkeys.get(action) {
+            Some(active) if active.accelerator != configured => {
+                warnings.push(format!(
+                    "{} shortcut '{}' was unavailable. '{}' is active instead.",
+                    hotkey_action_label(action),
+                    configured,
+                    active.accelerator
+                ));
+                set_configured_hotkey(config, action, active.accelerator.clone());
+            }
+            None => warnings.push(format!(
+                "No {} shortcut could be registered at startup.",
+                hotkey_action_label(action)
+            )),
+            _ => {}
+        }
+    }
+    warnings
+}
+
+fn configured_hotkey(config: &AppConfig, action: GlobalHotkeyAction) -> &str {
+    match action {
+        GlobalHotkeyAction::Capture => &config.hotkey,
+        GlobalHotkeyAction::Hide => &config.hide_hotkey,
+        GlobalHotkeyAction::NextTarget => &config.next_target_hotkey,
     }
 }
 
@@ -1764,6 +2137,15 @@ fn update_main_window_runtime_state<R: Runtime>(
     state: &State<'_, AppState>,
     next_state: MainWindowRuntimeState,
 ) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(WINDOW_LABEL_MAIN) {
+        apply_native_corner_preference(
+            &window,
+            !matches!(
+                next_state.mode,
+                MainWindowMode::DockedLeft | MainWindowMode::DockedRight
+            ),
+        );
+    }
     {
         let mut runtime_state = state
             .main_window_state
@@ -1837,6 +2219,7 @@ fn normalize_note_block_line_endings(note_block: &str) -> String {
 }
 
 fn prepend_to_file(target_file_path: &str, note_block: &str) -> Result<(), String> {
+    let started_at = Instant::now();
     ensure_destination_exists(target_file_path)?;
 
     let existing_content = if Path::new(target_file_path).exists() {
@@ -1851,8 +2234,14 @@ fn prepend_to_file(target_file_path: &str, note_block: &str) -> Result<(), Strin
         output.push_str(&existing_content);
     }
 
-    fs::write(target_file_path, output)
-        .map_err(|error| format!("failed to write target file {target_file_path}: {error}"))
+    atomic_write_string(Path::new(target_file_path), &output)
+        .map_err(|error| format!("failed to write target file {target_file_path}: {error}"))?;
+    log::info!(
+        "prepended note block to {} existing bytes in {} ms",
+        existing_content.len(),
+        started_at.elapsed().as_millis()
+    );
+    Ok(())
 }
 
 fn ensure_destination_exists(target_file_path: &str) -> Result<(), String> {
@@ -1866,7 +2255,7 @@ fn ensure_destination_exists(target_file_path: &str) -> Result<(), String> {
     }
 
     if !target_path.exists() {
-        fs::write(target_path, "").map_err(|error| {
+        atomic_write_string(target_path, "").map_err(|error| {
             format!(
                 "failed to create target file {}: {error}",
                 target_path.display()
@@ -1893,7 +2282,19 @@ fn current_time_millis() -> u128 {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Err(error) = show_main_window(app) {
+                log::error!("failed to activate existing instance: {error}");
+            }
+        }))
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Info)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
+                .max_file_size(2_000_000)
+                .build(),
+        )
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -1904,15 +2305,7 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
-
-            let config = match load_app_config(app.handle()) {
+            let mut config = match load_app_config(app.handle()) {
                 Ok(config) => config,
                 Err(error) => {
                     log::warn!("{error}");
@@ -1921,26 +2314,58 @@ pub fn run() {
             };
 
             let active_hotkeys = register_startup_hotkeys(app.handle(), &config);
+            let runtime_warnings = repair_startup_hotkey_config(&mut config, &active_hotkeys);
+            if !runtime_warnings.is_empty() {
+                save_app_config(app.handle(), &config)?;
+                for warning in &runtime_warnings {
+                    log::warn!("{warning}");
+                }
+            }
             let tray_menu_items = create_tray(app.handle(), &config)?;
+            let draft = match load_draft(app.handle()) {
+                Ok(draft) => draft,
+                Err(error) => {
+                    log::warn!("{error}");
+                    DraftSnapshot::default()
+                }
+            };
 
             app.manage(AppState {
                 config: Mutex::new(config),
                 tray_menu_items,
                 active_hotkeys: Mutex::new(active_hotkeys),
+                hotkey_update_lock: Mutex::new(()),
+                runtime_warnings: Mutex::new(runtime_warnings),
+                draft: Mutex::new(draft),
+                draft_save_generation: Mutex::new(0),
+                native_backdrop: Mutex::new(NativeBackdropState::default()),
                 main_window_state: Mutex::new(MainWindowRuntimeState::default()),
                 auto_dock_generation: Mutex::new(0),
                 manual_drag_in_progress: Mutex::new(false),
                 auto_dock_suppressed_until_ms: Mutex::new(0),
             });
 
+            log::info!(
+                "FloatingInputTool {} started with process id {}",
+                app.package_info().version,
+                std::process::id()
+            );
+
             if let Some(main_window) = app.get_webview_window(WINDOW_LABEL_MAIN) {
                 attach_main_window_events(app.handle(), &main_window);
+                update_native_backdrop(app.handle(), &main_window);
             }
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_app_config,
+            get_hotkey_runtime_status,
+            get_draft,
+            get_native_backdrop_status,
+            update_draft,
+            flush_draft,
+            clear_draft,
             set_theme_mode,
             set_language_mode,
             set_target_file_path,
@@ -1961,6 +2386,50 @@ pub fn run() {
             redock_main_window
         ])
         .on_menu_event(handle_menu_event)
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    app.run(|app_handle, event| {
+        if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+            let state = app_handle.state::<AppState>();
+            if let Err(error) = flush_draft_inner(app_handle, &state) {
+                log::error!("failed to flush draft during application exit: {error}");
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_note_block, prepend_to_file};
+    use std::fs;
+
+    #[test]
+    fn formats_multiline_callout_content() {
+        let template = "> [!fleeting]+ {{timestamp}}\n>\n{{text.callout}}";
+        let block = format_note_block("first\n\nthird", template);
+
+        assert!(block.contains("> first\r\n>\r\n> third\r\n"));
+        assert!(block.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn prepend_keeps_existing_markdown_content() {
+        let directory = std::env::temp_dir().join(format!(
+            "floating-input-tool-note-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("notes.md");
+        fs::write(&path, "existing\r\n").unwrap();
+
+        prepend_to_file(path.to_str().unwrap(), "new\r\n\r\n").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "new\r\n\r\nexisting\r\n"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

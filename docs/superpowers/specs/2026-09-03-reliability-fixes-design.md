@@ -114,3 +114,13 @@ Manual Windows verification will cover:
 - Failed shortcut updates leave both active and persisted shortcuts unchanged.
 - Interrupted config, draft, or Markdown writes do not truncate the previous valid file.
 - Production failures leave actionable logs without captured note content.
+
+## Runtime Polish Addendum
+
+- Acrylic windows must be clipped at the native HWND level with a DPI-aware 22 px radius so the material cannot remain visible in rectangular CSS corner gaps.
+- Native corner clipping must be refreshed after window size changes and applied to both the main and Settings windows.
+- The Discard and Hide actions share one footer icon-button layout: identical 42 px hit areas, aligned visual centers, matching muted opacity and stroke weight, and no rectangular hover or focus background.
+- Discard remains visually red and keeps its confirmation behavior, while disabled state uses reduced opacity without exposing its hit-area shape.
+- Focus state is application-controlled rather than inferred from Windows Acrylic defaults: focused windows use a high-opacity theme surface for readability, while unfocused windows expose more Acrylic blur as the inactive-state cue.
+- Losing focus triggers a delayed Acrylic refresh because Windows can otherwise replace inactive Acrylic with a flat material.
+- The 22 px native clip targets only the WebView client area. Invisible native resize borders stay outside the rendered region, and internal Tauri resize handles preserve edge/corner resizing without exposing non-client pixels.

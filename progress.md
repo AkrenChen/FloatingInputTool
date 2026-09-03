@@ -166,3 +166,36 @@
 - Added ownership metadata to Tauri bundle config and Cargo package metadata.
 - Added copyright and creator attribution to generated `config.help.md`.
 - Re-verified with `npm run build`, `cargo check`, JSON config parsing, and `npm run tauri:build`.
+
+## 2026-09-03
+
+### Session 21
+
+- Reviewed the installed Tauri implementation and traced the reported shortcut, draft-loss, and black-backdrop failures.
+- Wrote and committed the approved reliability fixes design as `e64575c`.
+- Started Phase 19 for idempotent Capture, single-instance enforcement, transactional shortcut updates, and release diagnostics.
+- Added single-instance enforcement, idempotent Capture behavior, native Windows foreground activation with retry, transactional shortcut replacement, startup fallback repair, and release log rotation.
+- Exposed actual active shortcuts and startup warnings to the main and Settings windows.
+- Verified Phase 19 with `cargo check` and `npm run build`.
+- Started Phase 20 for atomic draft persistence and recovery.
+- Added shared atomic storage and a separate `draft.json` model with Rust-side debouncing.
+- Added startup draft restoration, close-as-hide behavior, explicit discard, target restoration, and exit flushing.
+- Verified Phase 20 with `cargo check`, `npm run build`, and two passing Rust unit tests.
+- Started Phase 21 for native Acrylic and the stable non-black fallback.
+- Added native Windows Acrylic for main and Settings windows, including reapplication after show.
+- Added an opaque theme fallback for remote sessions and any Acrylic initialization failure.
+- Verified Phase 21 with `cargo check`, `npm run build`, and formatter checks.
+- Started Phase 22 for atomic config/note writes and additional tests.
+- Replaced direct config, help, draft, and Markdown writes with flushed temporary files and Windows atomic replacement.
+- Added Markdown formatting/prepend tests; all four Rust unit tests pass.
+- Started Phase 23 for linting, versioning, installer build, and runtime regression checks.
+- Runtime regression confirmed Acrylic, repeated Capture, Hide, single-instance activation, and draft recovery across close and process restart.
+- Started Phase 24 after visual QA found native Acrylic leaking outside the CSS corner radius and inconsistent Discard/Hide icon treatment.
+- Added explicit focus-state material ownership: focused surfaces become more opaque and unfocused surfaces expose more Acrylic, with a delayed native backdrop refresh after focus loss.
+- Paused the native corner implementation after three visual attempts: DWM plus region, region only, and region plus frameless-style enforcement all exposed non-client rendering artifacts in the translucent inactive state.
+- Reframed the implementation after the three-attempt stop: clip only the client area and move resize input to internal Tauri edge handles, preserving the approved 22 px radius without rendering native frame pixels.
+- User selected the lower-risk native DWM corner option after the custom 22 px region approaches proved unstable.
+- Added `DWMWA_WINDOW_CORNER_PREFERENCE` handling for the main and Settings windows.
+- Kept native corners enabled in normal/expanded modes and disabled them while side-docked.
+- Confirmed the release process starts from `target/release/app.exe`, exposes the updated Discard/Hide UI tree, enables Acrylic, and reports no DWM corner failure.
+- Rebuilt `FloatingInputTool_0.2.0_x64-setup.exe` and passed Rust tests, Rust formatting, Rust compile checks, frontend lint/build, and `git diff --check`.

@@ -8,9 +8,11 @@ import type {
   AppConfig,
   CustomTheme,
   FeedbackTone,
+  HotkeyRuntimeStatus,
   HotkeyUpdateResponse,
   LanguageMode,
   MarkdownTarget,
+  NativeBackdropStatus,
   ResolvedTheme,
   SaveShortcutMode,
   ThemeMode,
@@ -65,6 +67,17 @@ function SettingsApp() {
   const [settingsFeedback, setSettingsFeedback] = useState('')
   const [settingsFeedbackTone, setSettingsFeedbackTone] = useState<FeedbackTone>('normal')
   const [recordingHotkeyField, setRecordingHotkeyField] = useState<HotkeyField | null>(null)
+  const [hasNativeBackdrop, setHasNativeBackdrop] = useState(false)
+  const [isWindowFocused, setIsWindowFocused] = useState(true)
+
+  function applyHotkeyConfig(config: AppConfig) {
+    setHotkey(config.hotkey)
+    setHotkeyInput(config.hotkey)
+    setHideHotkey(config.hideHotkey)
+    setHideHotkeyInput(config.hideHotkey)
+    setNextTargetHotkey(config.nextTargetHotkey)
+    setNextTargetHotkeyInput(config.nextTargetHotkey)
+  }
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -78,28 +91,63 @@ function SettingsApp() {
 
   useEffect(() => {
     let ignore = false
+    let unlistenFocusChanged: (() => void) | undefined
+    const currentWindow = getCurrentWindow()
+
+    currentWindow.isFocused().then((focused) => {
+      if (!ignore) {
+        setIsWindowFocused(focused)
+      }
+    })
+
+    currentWindow.onFocusChanged(({ payload: focused }) => {
+      if (!ignore) {
+        setIsWindowFocused(focused)
+      }
+    }).then((unlisten) => {
+      unlistenFocusChanged = unlisten
+    })
+
+    return () => {
+      ignore = true
+      unlistenFocusChanged?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    let ignore = false
     let unlistenThemeChange: (() => void) | undefined
     let unlistenAppConfigChange: (() => void) | undefined
+    let unlistenNativeBackdrop: (() => void) | undefined
 
     const loadConfig = async () => {
       try {
-        const config = await invoke<AppConfig>('get_app_config')
+        const [config, hotkeyStatus, backdropStatus] = await Promise.all([
+          invoke<AppConfig>('get_app_config'),
+          invoke<HotkeyRuntimeStatus>('get_hotkey_runtime_status'),
+          invoke<NativeBackdropStatus>('get_native_backdrop_status'),
+        ])
         if (!ignore) {
           setThemeMode(config.themeMode)
           setLanguageMode(config.languageMode)
           setTargets(config.targets)
           setActiveTargetId(config.activeTargetId)
-          setHotkey(config.hotkey)
+          setHotkey(hotkeyStatus.capture ?? '')
           setHotkeyInput(config.hotkey)
-          setHideHotkey(config.hideHotkey)
+          setHideHotkey(hotkeyStatus.hide ?? '')
           setHideHotkeyInput(config.hideHotkey)
-          setNextTargetHotkey(config.nextTargetHotkey)
+          setNextTargetHotkey(hotkeyStatus.nextTarget ?? '')
           setNextTargetHotkeyInput(config.nextTargetHotkey)
           setSaveShortcutMode(config.saveShortcutMode)
           setNoteTemplate(config.noteTemplate)
           setNoteTemplateInput(config.noteTemplate)
           setCustomThemeDraft(config.customTheme)
           setSavedCustomTheme(config.customTheme)
+          setHasNativeBackdrop(backdropStatus.available)
+          if (hotkeyStatus.warnings.length > 0) {
+            setSettingsFeedback(hotkeyStatus.warnings.join(' '))
+            setSettingsFeedbackTone('error')
+          }
         }
       } catch (error) {
         console.error('Failed to load settings config', error)
@@ -136,6 +184,14 @@ function SettingsApp() {
       })
     }
 
+    const attachNativeBackdropListener = async () => {
+      unlistenNativeBackdrop = await listen<NativeBackdropStatus>('native-backdrop-changed', (event) => {
+        if (!ignore) {
+          setHasNativeBackdrop(event.payload.available)
+        }
+      })
+    }
+
     loadConfig()
     attachThemeListener().catch((error) => {
       console.error('Failed to attach settings listeners', error)
@@ -143,11 +199,15 @@ function SettingsApp() {
     attachAppConfigListener().catch((error) => {
       console.error('Failed to attach settings app config listener', error)
     })
+    attachNativeBackdropListener().catch((error) => {
+      console.error('Failed to attach settings native backdrop listener', error)
+    })
 
     return () => {
       ignore = true
       unlistenThemeChange?.()
       unlistenAppConfigChange?.()
+      unlistenNativeBackdrop?.()
     }
   }, [])
 
@@ -386,6 +446,7 @@ function SettingsApp() {
         hotkey: hotkeyInputForField(field),
       })
       applyHotkeyConfig(response.config)
+      setActiveHotkeyForField(field, response.activeHotkey ?? '')
 
       if (response.warning) {
         setSettingsFeedback(response.warning)
@@ -398,15 +459,6 @@ function SettingsApp() {
     } finally {
       setHotkeySavingState(field, false)
     }
-  }
-
-  const applyHotkeyConfig = (config: AppConfig) => {
-    setHotkey(config.hotkey)
-    setHotkeyInput(config.hotkey)
-    setHideHotkey(config.hideHotkey)
-    setHideHotkeyInput(config.hideHotkey)
-    setNextTargetHotkey(config.nextTargetHotkey)
-    setNextTargetHotkeyInput(config.nextTargetHotkey)
   }
 
   const hotkeyInputForField = (field: HotkeyField) => {
@@ -445,6 +497,20 @@ function SettingsApp() {
     }
 
     setIsSavingHotkey(isSaving)
+  }
+
+  const setActiveHotkeyForField = (field: HotkeyField, activeHotkey: string) => {
+    if (field === 'hide') {
+      setHideHotkey(activeHotkey)
+      return
+    }
+
+    if (field === 'next-target') {
+      setNextTargetHotkey(activeHotkey)
+      return
+    }
+
+    setHotkey(activeHotkey)
   }
 
   const handleSaveShortcutModeChange = async (nextMode: SaveShortcutMode) => {
@@ -575,7 +641,12 @@ function SettingsApp() {
   }
 
   return (
-    <main className={`settings-app-shell theme-${resolvedTheme} lang-${languageMode}`} style={settingsShellStyle}>
+    <main
+      className={`settings-app-shell theme-${resolvedTheme} lang-${languageMode} ${
+        hasNativeBackdrop ? 'backdrop-native' : 'backdrop-fallback'
+      } ${isWindowFocused ? 'window-focused' : 'window-unfocused'}`}
+      style={settingsShellStyle}
+    >
       <section className="settings-panel settings-window" role="dialog" aria-label={text.settingsTitle}>
         <div className="settings-header">
           <div

@@ -48,3 +48,27 @@
 - Ownership watermarking should avoid modifying captured notes. Settings UI, generated help text, and Windows bundle metadata provide attribution without polluting user content.
 - Approved design spec path:
   [2026-04-21-floating-input-tool-design.md](D:/Claude/Project/FloatingInputTool/docs/superpowers/specs/2026-04-21-floating-input-tool-design.md)
+- Reliability review confirmed that Capture hiding an already-visible window is a direct cause of intermittent perceived shortcut failure.
+- The approved reliability design is at `docs/superpowers/specs/2026-09-03-reliability-fixes-design.md`.
+- Acrylic, not Mica, is required to reflect the actual application content behind the floating window.
+- The current frontend draft exists only in React memory and the current main close action explicitly clears it.
+- Direct `fs::write` calls for config and prepended notes create avoidable partial-overwrite risk.
+- Capture now always restores and focuses the editor; Hide remains the only shortcut that hides or docks.
+- Shortcut changes now validate conflicts and registration before changing persisted configuration.
+- Startup repairs configured shortcuts to the actual registered fallback and exposes warnings to both windows.
+- A single-instance plugin now routes subsequent launches to the existing capture window.
+- Rust now owns the latest draft snapshot and atomically persists it after a 150 ms debounce.
+- Main Close and Hide flush the draft; successful note save clears it; explicit discard uses a dedicated trash action.
+- Draft recovery restores text, creation time, and the previously selected target.
+- Native Acrylic is now applied on window creation and show, with remote-session and application-failure detection.
+- Both frontend windows start in an opaque theme fallback and only reduce opacity after Rust confirms Acrylic is active.
+- Config, config help, draft, and prepended Markdown writes now share the same Windows atomic replacement helper.
+- Note saves log only byte count and duration, not note content.
+- CSS border radius clips only the WebView content; Acrylic still fills the rectangular native HWND, which exposes material in the four corner gaps.
+- The Discard button used a smaller hit area, heavier stroke, and rectangular hover fill than Hide, causing visible footer misalignment.
+- Windows Acrylic changes its own active/inactive rendering, which made the unfocused window look flatter and more solid even though the frontend had no focus-state styling.
+- `SetWindowRgn` conflicts with the hidden non-client surface retained for native edge resizing. Even after caption styles are removed, an unfocused translucent window can reveal cached title text, so region clipping is not a stable final approach while native resizing remains enabled.
+- Reapplying Acrylic from every focus-loss event can feed back into further focus changes after native region updates. Focus appearance must remain frontend-controlled without mutating the native material on each focus transition.
+- The stable Windows corner solution is `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`, which preserves Acrylic, native resizing, and the undecorated WebView. Windows controls the resulting radius, typically about 8-10 px.
+- Native rounding is disabled while the main window is side-docked and restored for normal or expanded modes, matching the frontend's square docked edge.
+- The Windows capture backend does not composite this transparent layered WebView correctly and can show only the desktop background; the accessibility tree and application logs remain usable for runtime verification.

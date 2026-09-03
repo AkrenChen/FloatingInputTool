@@ -1,3 +1,4 @@
+use crate::storage::atomic_write_string;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use tauri::{AppHandle, Manager, Runtime};
@@ -231,7 +232,7 @@ pub fn save_app_config<R: Runtime>(app: &AppHandle<R>, config: &AppConfig) -> Re
     let raw = serde_json::to_string_pretty(config)
         .map_err(|error| format!("failed to serialize config: {error}"))?;
 
-    fs::write(&config_path, raw).map_err(|error| {
+    atomic_write_string(&config_path, &raw).map_err(|error| {
         format!(
             "failed to write config to {}: {error}",
             config_path.display()
@@ -256,7 +257,7 @@ pub fn ensure_config_help_file<R: Runtime>(app: &AppHandle<R>) -> Result<(), Str
         )
     })?;
 
-    fs::write(&help_path, CONFIG_HELP_CONTENT).map_err(|error| {
+    atomic_write_string(&help_path, CONFIG_HELP_CONTENT).map_err(|error| {
         format!(
             "failed to write config help to {}: {error}",
             help_path.display()

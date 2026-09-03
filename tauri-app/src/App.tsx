@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -9,10 +9,13 @@ import type {
   AppConfigChangedPayload,
   CustomTheme,
   CustomThemePreviewChangedPayload,
+  DraftSnapshot,
+  HotkeyRuntimeStatus,
   LanguageMode,
   MainWindowMode,
   MainWindowModeChangedPayload,
   MarkdownTarget,
+  NativeBackdropStatus,
   ResolvedTheme,
   SaveShortcutMode,
   ThemeModeChangedPayload,
@@ -39,6 +42,9 @@ function App() {
   const [mainWindowMode, setMainWindowMode] = useState<MainWindowMode>('normal')
   const [dockSide, setDockSide] = useState<'left' | 'right' | null>(null)
   const [draft, setDraft] = useState('')
+  const [isDraftLoaded, setIsDraftLoaded] = useState(false)
+  const [hasNativeBackdrop, setHasNativeBackdrop] = useState(false)
+  const [isWindowFocused, setIsWindowFocused] = useState(true)
   const [createdAt, setCreatedAt] = useState(() => formatTimestamp(new Date()))
   const [captureFeedback, setCaptureFeedback] = useState('')
   const [isSavingNote, setIsSavingNote] = useState(false)
@@ -55,6 +61,64 @@ function App() {
   const cursorPaddingPx = 8
   const dockReopenCooldownMs = 260
 
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+  }, [])
+
+  const scheduleRedock = useCallback(
+    (reason: string, delayOverride?: number) => {
+      if (mainWindowMode !== 'expanded-from-dock') {
+        sideHideDebugLog('scheduleRedock skipped: not expanded', { reason, mainWindowMode })
+        return
+      }
+
+      if (isEditorFocusedRef.current || cursorInsideWindowRef.current) {
+        sideHideDebugLog('scheduleRedock skipped: blocked by focus/inside', {
+          reason,
+          isEditorFocused: isEditorFocusedRef.current,
+          cursorInside: cursorInsideWindowRef.current,
+        })
+        clearCloseTimer()
+        return
+      }
+
+      clearCloseTimer()
+      const delay = delayOverride ?? appConfig?.hoverCloseDelayMs ?? 320
+      sideHideDebugLog('scheduleRedock armed', { reason, delay })
+      closeTimerRef.current = window.setTimeout(async () => {
+        closeTimerRef.current = null
+
+        if (isEditorFocusedRef.current || cursorInsideWindowRef.current) {
+          sideHideDebugLog('scheduleRedock fire canceled by focus/inside', {
+            reason,
+            isEditorFocused: isEditorFocusedRef.current,
+            cursorInside: cursorInsideWindowRef.current,
+          })
+          return
+        }
+
+        try {
+          const isInside = await invoke<boolean>('is_cursor_inside_main_window', {
+            paddingPx: cursorPaddingPx,
+          })
+          sideHideDebugLog('scheduleRedock fire recheck', { reason, isInside })
+          if (isInside) {
+            return
+          }
+
+          sideHideDebugLog('redock_main_window invoke', { reason })
+          await invoke('redock_main_window')
+        } catch (error) {
+          console.error('Failed to redock window', error)
+        }
+      }, delay)
+    },
+    [appConfig?.hoverCloseDelayMs, clearCloseTimer, cursorPaddingPx, mainWindowMode],
+  )
+
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     const onChange = (event: MediaQueryListEvent) => {
@@ -66,12 +130,41 @@ function App() {
   }, [])
 
   useEffect(() => {
+    let ignore = false
+    let unlistenFocusChanged: (() => void) | undefined
+    const currentWindow = getCurrentWindow()
+
+    currentWindow.isFocused().then((focused) => {
+      if (!ignore) {
+        setIsWindowFocused(focused)
+      }
+    })
+
+    currentWindow.onFocusChanged(({ payload: focused }) => {
+      if (!ignore) {
+        setIsWindowFocused(focused)
+      }
+    }).then((unlisten) => {
+      unlistenFocusChanged = unlisten
+    })
+
+    return () => {
+      ignore = true
+      unlistenFocusChanged?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (draft.trim()) {
+      return
+    }
+
     const timer = window.setInterval(() => {
       setCreatedAt(formatTimestamp(new Date()))
     }, 60_000)
 
     return () => window.clearInterval(timer)
-  }, [])
+  }, [draft])
 
   useEffect(() => {
     let ignore = false
@@ -80,14 +173,38 @@ function App() {
     let unlistenCustomThemePreviewChange: (() => void) | undefined
     let unlistenMainWindowModeChange: (() => void) | undefined
     let unlistenFocusMainEditor: (() => void) | undefined
+    let unlistenNativeBackdrop: (() => void) | undefined
 
     const loadConfig = async () => {
       try {
-        const config = await invoke<AppConfig>('get_app_config')
+        const [config, hotkeyStatus, restoredDraft, backdropStatus] = await Promise.all([
+          invoke<AppConfig>('get_app_config'),
+          invoke<HotkeyRuntimeStatus>('get_hotkey_runtime_status'),
+          invoke<DraftSnapshot>('get_draft'),
+          invoke<NativeBackdropStatus>('get_native_backdrop_status'),
+        ])
+        let resolvedConfig = config
+        if (
+          restoredDraft.text.trim() &&
+          restoredDraft.targetId &&
+          restoredDraft.targetId !== config.activeTargetId &&
+          config.targets.some((target) => target.id === restoredDraft.targetId)
+        ) {
+          resolvedConfig = await invoke<AppConfig>('set_active_target_id', {
+            activeTargetId: restoredDraft.targetId,
+          })
+        }
         if (!ignore) {
-          setAppConfig(config)
-          setThemeMode(config.themeMode)
-          setLanguageMode(config.languageMode)
+          setAppConfig(resolvedConfig)
+          setThemeMode(resolvedConfig.themeMode)
+          setLanguageMode(resolvedConfig.languageMode)
+          setDraft(restoredDraft.text)
+          setCreatedAt(restoredDraft.createdAt || formatTimestamp(new Date()))
+          setIsDraftLoaded(true)
+          setHasNativeBackdrop(backdropStatus.available)
+          if (hotkeyStatus.warnings.length > 0) {
+            setCaptureFeedback(hotkeyStatus.warnings.join(' '))
+          }
         }
       } catch (error) {
         console.error('Failed to load app config', error)
@@ -146,6 +263,14 @@ function App() {
       })
     }
 
+    const attachNativeBackdropListener = async () => {
+      unlistenNativeBackdrop = await listen<NativeBackdropStatus>('native-backdrop-changed', (event) => {
+        if (!ignore) {
+          setHasNativeBackdrop(event.payload.available)
+        }
+      })
+    }
+
     loadConfig()
     attachThemeListener().catch((error) => {
       console.error('Failed to attach theme listener', error)
@@ -162,6 +287,9 @@ function App() {
     attachFocusMainEditorListener().catch((error) => {
       console.error('Failed to attach main editor focus listener', error)
     })
+    attachNativeBackdropListener().catch((error) => {
+      console.error('Failed to attach native backdrop listener', error)
+    })
 
     return () => {
       ignore = true
@@ -170,6 +298,7 @@ function App() {
       unlistenCustomThemePreviewChange?.()
       unlistenMainWindowModeChange?.()
       unlistenFocusMainEditor?.()
+      unlistenNativeBackdrop?.()
     }
   }, [])
 
@@ -211,14 +340,14 @@ function App() {
     })
 
     previousMainWindowModeRef.current = mainWindowMode
-  }, [dockSide, mainWindowMode])
+  }, [clearCloseTimer, dockSide, mainWindowMode])
 
   useEffect(() => {
     isEditorFocusedRef.current = isEditorFocused
     if (isEditorFocused) {
       clearCloseTimer()
     }
-  }, [isEditorFocused])
+  }, [clearCloseTimer, isEditorFocused])
 
   useEffect(
     () => () => {
@@ -287,7 +416,7 @@ function App() {
         window.clearTimeout(timeoutId)
       }
     }
-  }, [mainWindowMode])
+  }, [clearCloseTimer, mainWindowMode, scheduleRedock])
 
   useEffect(() => {
     const finalizeManualWindowDrag = () => {
@@ -335,6 +464,32 @@ function App() {
   const activeTargetId = appConfig?.activeTargetId ?? targets[0]?.id ?? ''
   const text = uiText[languageMode]
 
+  useEffect(() => {
+    if (!isDraftLoaded) {
+      return
+    }
+    const snapshot: DraftSnapshot = {
+      text: draft,
+      targetId: activeTargetId,
+      createdAt,
+      updatedAt: new Date().toISOString(),
+    }
+    void invoke('update_draft', { draft: snapshot }).catch((error) => {
+      console.error('Failed to update draft snapshot', error)
+    })
+  }, [activeTargetId, createdAt, draft, isDraftLoaded])
+
+  const flushCurrentDraft = async () => {
+    const snapshot: DraftSnapshot = {
+      text: draft,
+      targetId: activeTargetId,
+      createdAt,
+      updatedAt: new Date().toISOString(),
+    }
+    await invoke('update_draft', { draft: snapshot })
+    await invoke('flush_draft')
+  }
+
   const hideWindow = async () => {
     clearOpenTimer()
     clearCloseTimer()
@@ -375,6 +530,7 @@ function App() {
   const handleHide = async () => {
     setCaptureFeedback('')
     try {
+      await flushCurrentDraft()
       await invoke('hide_or_dock_main_window')
     } catch (error) {
       console.error('Failed to hide or dock window', error)
@@ -383,9 +539,32 @@ function App() {
   }
 
   const handleClose = async () => {
-    setDraft('')
     setCaptureFeedback('')
+    try {
+      await flushCurrentDraft()
+    } catch (error) {
+      console.error('Failed to flush draft before closing', error)
+    }
     await hideWindow()
+  }
+
+  const handleDiscardDraft = async () => {
+    if (!draft && !captureFeedback) {
+      return
+    }
+    if (draft && !window.confirm(text.discardDraftConfirm)) {
+      return
+    }
+    try {
+      await invoke('clear_draft')
+      setDraft('')
+      setCreatedAt(formatTimestamp(new Date()))
+      setCaptureFeedback('')
+      window.setTimeout(() => textareaRef.current?.focus(), 0)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setCaptureFeedback(message)
+    }
   }
 
   const handleTargetSelect = async (targetId: string) => {
@@ -479,13 +658,6 @@ function App() {
     }
   }
 
-  const clearCloseTimer = () => {
-    if (closeTimerRef.current) {
-      window.clearTimeout(closeTimerRef.current)
-      closeTimerRef.current = null
-    }
-  }
-
   const handleDockHotzoneEnter = () => {
     if (!isDocked) {
       return
@@ -517,54 +689,6 @@ function App() {
     clearOpenTimer()
   }
 
-  const scheduleRedock = (reason: string, delayOverride?: number) => {
-    if (mainWindowMode !== 'expanded-from-dock') {
-      sideHideDebugLog('scheduleRedock skipped: not expanded', { reason, mainWindowMode })
-      return
-    }
-
-    if (isEditorFocusedRef.current || cursorInsideWindowRef.current) {
-      sideHideDebugLog('scheduleRedock skipped: blocked by focus/inside', {
-        reason,
-        isEditorFocused: isEditorFocusedRef.current,
-        cursorInside: cursorInsideWindowRef.current,
-      })
-      clearCloseTimer()
-      return
-    }
-
-    clearCloseTimer()
-    const delay = delayOverride ?? appConfig?.hoverCloseDelayMs ?? 320
-    sideHideDebugLog('scheduleRedock armed', { reason, delay })
-    closeTimerRef.current = window.setTimeout(async () => {
-      closeTimerRef.current = null
-
-      if (isEditorFocusedRef.current || cursorInsideWindowRef.current) {
-        sideHideDebugLog('scheduleRedock fire canceled by focus/inside', {
-          reason,
-          isEditorFocused: isEditorFocusedRef.current,
-          cursorInside: cursorInsideWindowRef.current,
-        })
-        return
-      }
-
-      try {
-        const isInside = await invoke<boolean>('is_cursor_inside_main_window', {
-          paddingPx: cursorPaddingPx,
-        })
-        sideHideDebugLog('scheduleRedock fire recheck', { reason, isInside })
-        if (isInside) {
-          return
-        }
-
-        sideHideDebugLog('redock_main_window invoke', { reason })
-        await invoke('redock_main_window')
-      } catch (error) {
-        console.error('Failed to redock window', error)
-      }
-    }, delay)
-  }
-
   const appShellStyle = {
     '--dock-visible-width': `${appConfig?.visibleHandleWidthPx ?? 22}px`,
     '--dock-hotzone-width': `${appConfig?.hotzoneWidthPx ?? 36}px`,
@@ -579,7 +703,11 @@ function App() {
 
   return (
     <main
-      className={`app-shell theme-${resolvedTheme} lang-${languageMode} ${isDocked ? `is-docked dock-${dockSide}` : ''} ${
+      className={`app-shell theme-${resolvedTheme} lang-${languageMode} ${
+        hasNativeBackdrop ? 'backdrop-native' : 'backdrop-fallback'
+      } ${isWindowFocused ? 'window-focused' : 'window-unfocused'} ${
+        isDocked ? `is-docked dock-${dockSide}` : ''
+      } ${
         mainWindowMode === 'expanded-from-dock' ? 'is-expanded-from-dock' : ''
       }`}
       style={appShellStyle}
@@ -676,12 +804,28 @@ function App() {
 
               <div className="window-actions">
                 <button
-                  className="icon-button hide-button"
+                  className="icon-button footer-icon-button discard-button"
+                  type="button"
+                  aria-label={text.discardDraft}
+                  title={text.discardDraft}
+                  disabled={!draft}
+                  onClick={handleDiscardDraft}
+                >
+                  <svg className="footer-action-icon discard-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M4 7H20" />
+                    <path d="M9 7V4H15V7" />
+                    <path d="M6.5 7L7.5 20H16.5L17.5 7" />
+                    <path d="M10 11V16" />
+                    <path d="M14 11V16" />
+                  </svg>
+                </button>
+                <button
+                  className="icon-button footer-icon-button hide-button"
                   type="button"
                   aria-label={text.hide}
                   onClick={handleHide}
                 >
-                  <svg className="ghost-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <svg className="footer-action-icon ghost-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                     <path d="M16 10.5C16 11.3284 15.5523 12 15 12C14.4477 12 14 11.3284 14 10.5C14 9.67157 14.4477 9 15 9C15.5523 9 16 9.67157 16 10.5Z" />
                     <ellipse cx="9" cy="10.5" rx="1" ry="1.5" />
                     <path d="M22 12.3006C22 6.61173 17.5228 2 12 2C6.47715 2 2 6.61173 2 12.3006V19.723C2 21.0453 3.35098 21.9054 4.4992 21.314C5.42726 20.836 6.5328 20.9069 7.39614 21.4998C8.36736 22.1667 9.63264 22.1667 10.6039 21.4998L10.9565 21.2576C11.5884 20.8237 12.4116 20.8237 13.0435 21.2576L13.3961 21.4998C14.3674 22.1667 15.6326 22.1667 16.6039 21.4998C17.4672 20.9069 18.5727 20.836 19.5008 21.314C20.649 21.9054 22 21.0453 22 19.723V16.0118" />

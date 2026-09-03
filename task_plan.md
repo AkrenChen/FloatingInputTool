@@ -6,7 +6,7 @@ Build the first working version of FloatingInputTool as a lightweight AutoHotkey
 
 ## Current Phase
 
-Phase 17 - Add lightweight ownership watermarking
+Phase 24 complete - Reliability and visual fixes are ready for installation
 
 ## Phases
 
@@ -29,6 +29,13 @@ Phase 17 - Add lightweight ownership watermarking
 | 15 | in_progress | Add configurable capture, hide, and next-target global hotkeys |
 | 16 | in_progress | Add tray-based English/Chinese UI language switching |
 | 17 | in_progress | Add visible and metadata ownership marks for shared builds |
+| 18 | complete | Review and approve the reliability fixes design |
+| 19 | complete | Make Capture idempotent, enforce one instance, and make shortcut updates transactional |
+| 20 | complete | Persist drafts atomically and restore them across process restarts |
+| 21 | complete | Apply native Windows Acrylic with a non-black fallback |
+| 22 | complete | Make config and note writes atomic, enable release diagnostics, and add tests |
+| 23 | complete | Build the installer and run the manual regression matrix |
+| 24 | complete | Apply Windows native corners and align Discard with Hide |
 
 ## Decisions
 
@@ -48,7 +55,10 @@ Phase 17 - Add lightweight ownership watermarking
 - The initial Tauri scaffold lives in `tauri-app/` to keep the migration isolated from the preserved AHK prototype.
 - Side hide will use a single-window docking model rather than a second functional capture window.
 - Main and settings windows should stay out of the Windows taskbar; the tray icon is the app's persistent presence.
-- Global shortcuts are action-based: Capture toggles/focuses input, Hide preserves the draft while hiding or docking, and Next Target cycles the active markdown target without touching the draft.
+- Global shortcuts are action-based: Capture always shows and focuses input, Hide preserves the draft while hiding or docking, and Next Target cycles the active markdown target without touching the draft.
+- Drafts are stored separately from configuration and clear only after successful save or explicit discard.
+- Windows Acrylic is preferred because it reflects the actual content behind the floating window; a theme-colored fallback must never expose a black transparent surface.
+- Config, draft, and Markdown replacement writes must preserve the previous valid file if a write fails.
 - UI language is controlled from the tray menu and persisted as `languageMode`; Chinese mode uses a SimHei-first font stack in the web windows.
 - Ownership marking should be lightweight and non-invasive: Settings footer, generated config help, and package metadata only. Saved user notes should not contain watermarks.
 
@@ -70,9 +80,21 @@ Phase 17 - Add lightweight ownership watermarking
 |-------|---------|------------|
 | Git push rejected because remote already had an initial commit | 1 | Fetched origin/main, rebased local work onto it, then pushed successfully |
 | GitHub SSL error during pull/rebase flow | 1 | Used already-fetched origin/main locally and continued with a local rebase |
+| Cargo registry query started in offline mode | 1 | Re-ran the version query with approved network access and resolved `tauri-plugin-single-instance` 2.4.4 |
+| Cargo registry source search used a Windows wildcard path unsupported by `rg` | 1 | Read the exact Tauri source path returned by the successful match |
+| `cargo fmt` could not write source files under the managed filesystem policy | 1 | Applied the exact formatter diff with `apply_patch` and kept `cargo fmt --check` as verification |
+| Sandboxed `cargo check` could not create the target lock file | 1 | Re-ran the approved Cargo check with project write access |
+| ESLint scanned generated Rust target assets and flagged React declaration order | 1 | Ignored `src-tauri/target`, removed the new synchronous effect state update, and stabilized redock helpers with `useCallback` |
+| First combined lint-fix patch used a stale effect dependency context | 1 | Split the changes into smaller patches using the current line structure |
+| Combining DWM corner preference with an explicit region repainted a native title strip | 1 | Removed DWM frame ownership and kept precise region clipping only |
+| Region-only clipping exposed the hidden non-client caption when the unfocused surface became translucent | 2 | Preserve the resize frame but explicitly remove caption, system-menu, and caption-button styles before clipping |
+| Clearing caption styles removed the buttons but a translucent inactive window still exposed cached non-client title text | 3 | Stop region-based patching; choose between standard DWM corners or custom resize handles before continuing |
+| Client-area region coordinates clipped the entire WebView and focus-loss refresh caused an Acrylic event loop | 1 | Remove native non-client resizing entirely, restore full-window region coordinates, and keep focus appearance frontend-only |
+| Full-window region with the native resize frame removed still produced an invisible WebView surface | 2 | Revert all region-based experiments and return to the verified visible baseline before selecting a different native architecture |
+| Cargo source search used a wildcard path that Windows rejected | 1 | Resolved the exact `windows-sys-0.59.0` directory first, then searched that path |
+| Windows capture returned only the desktop behind the transparent layered window | 1 | Verified the release process, accessibility tree, Acrylic log, and DWM return path instead of treating the capture limitation as an app failure |
 
 ## Next Actions
 
-1. Manually verify that taskbar buttons are hidden while the tray icon remains usable.
-2. Manually verify first-click typing after side-handle expansion.
-3. Manually verify the Settings footer and Windows installer/exe details show the expected ownership information.
+1. Install `FloatingInputTool_0.2.0_x64-setup.exe` over the existing build.
+2. Confirm the Windows standard corner radius and focused/unfocused appearance on the user's desktop compositor.

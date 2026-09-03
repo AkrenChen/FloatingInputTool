@@ -44,6 +44,25 @@ export type AppConfig = {
 export type HotkeyUpdateResponse = {
   config: AppConfig
   warning?: string | null
+  activeHotkey?: string | null
+}
+
+export type HotkeyRuntimeStatus = {
+  capture?: string | null
+  hide?: string | null
+  nextTarget?: string | null
+  warnings: string[]
+}
+
+export type DraftSnapshot = {
+  text: string
+  targetId: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type NativeBackdropStatus = {
+  available: boolean
 }
 
 export type ThemeModeChangedPayload = {
@@ -154,6 +173,8 @@ export const uiText = {
     dockLabel: 'Fleeting Note',
     close: 'Close',
     hide: 'Hide',
+    discardDraft: 'Discard draft',
+    discardDraftConfirm: 'Discard the current unsaved draft?',
     markdownTargets: 'Markdown targets',
     editorLabel: 'Fleeting note content',
     placeholder: 'Capture your fleeting thoughts',
@@ -215,6 +236,8 @@ export const uiText = {
     dockLabel: '闪念笔记',
     close: '关闭',
     hide: '隐藏',
+    discardDraft: '丢弃草稿',
+    discardDraftConfirm: '确定丢弃当前未保存的草稿吗？',
     markdownTargets: 'Markdown 目标',
     editorLabel: '闪念笔记内容',
     placeholder: '记录你的闪念',
