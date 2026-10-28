@@ -2,6 +2,8 @@
 
 Date: 2026-04-22
 
+Behavior updated: 2026-10-27. Dragging to an edge automatically docks the window. Saving successfully from the expanded docked state collapses it back to the same side; saving from normal mode hides it completely.
+
 ## Goal
 
 Add a side-hide behavior to the Tauri main window without introducing a second functional capture window.
@@ -21,6 +23,8 @@ This approach is preferred over creating a second handle window because it keeps
 ### Entering Side Hide
 
 The `Hide` action only becomes a side-hide action when the main window is already close enough to a left or right screen edge.
+
+Dragging the main window to a qualifying left or right edge also automatically enters side-hide mode after the drag ends. No separate `Hide` action is required.
 
 The app checks the current screen that contains the window and compares the window bounds against that screen's left and right edges.
 
@@ -136,9 +140,10 @@ The implementation should preserve enough previous geometry to return the window
 
 ## Interaction Rules
 
-- `Save` still writes to markdown and hides the window normally.
+- `Save` in normal mode writes to markdown and hides the window completely.
+- `Save` in `expanded-from-dock` mode writes to markdown, clears the saved draft, and collapses the window back to its original docked side, leaving the handle visible. It must not remain expanded or wait for the cursor to leave. A failed save keeps the editor and draft available.
 - `Close` still clears the draft and hides the window normally.
-- `Hide` is the action that can enter side-hide mode when edge conditions are met.
+- Both dragging to a qualifying edge and `Hide` near an edge can enter side-hide mode.
 - Global hotkey behavior should continue to show the main window normally; side-hide should not break summon behavior.
 - Tray `Show` should also continue to restore the main window normally.
 
@@ -152,6 +157,9 @@ The implementation should preserve enough previous geometry to return the window
 
 Manual verification should cover:
 
+- dragging to either edge and automatically docking after releasing the mouse, without pressing `Hide`
+- expanding from either docked side, saving successfully, and immediately collapsing back to the same side with the handle visible
+- saving from normal mode and hiding completely
 - hiding near the left edge and getting left docking
 - hiding near the right edge and getting right docking
 - hiding away from edges and getting normal hide instead of docking

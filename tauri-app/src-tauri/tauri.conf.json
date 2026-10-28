@@ -29,10 +29,11 @@
     "windows": [
       {
         "title": "FloatingInputTool",
-        "width": 560,
-        "height": 360,
-        "minWidth": 520,
-        "minHeight": 320,
+        "width": 704,
+        "height": 504,
+        "minWidth": 664,
+        "minHeight": 464,
+        "visible": false,
         "resizable": true,
         "fullscreen": false,
         "decorations": false,

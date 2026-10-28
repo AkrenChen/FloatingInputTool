@@ -89,6 +89,9 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-single-instance",
  "window-vibrancy",
+ "windows",
+ "windows-core 0.61.2",
+ "windows-numerics",
  "windows-sys 0.59.0",
 ]
 

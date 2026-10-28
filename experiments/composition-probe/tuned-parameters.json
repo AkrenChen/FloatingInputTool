@@ -1,0 +1,15 @@
+{
+  "focusedBlur": 0,
+  "idleBlur": 0,
+  "focusedTint": 0,
+  "idleTint": 0,
+  "focusedOpacity": 1,
+  "idleOpacity": 0.34,
+  "focusedMaterialOpacity": 1,
+  "idleMaterialOpacity": 0.85,
+  "shadowBlur": 5,
+  "shadowOpacity": 0.24,
+  "shadowY": 2,
+  "cornerRadius": 24,
+  "preview": "follow"
+}

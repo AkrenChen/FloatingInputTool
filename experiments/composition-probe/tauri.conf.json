@@ -1,0 +1,22 @@
+{
+  "$schema": "../../tauri-app/node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Floating Composition Probe",
+  "version": "0.1.0",
+  "identifier": "com.jolynea.floatinginputtool.composition-probe",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{
+      "label": "pattern", "title": "Probe Live Background Reference", "url": "pattern.html",
+      "width": 900, "height": 900, "x": 100, "y": 20, "visible": true
+    }, {
+      "label": "main", "title": "Floating Composition Probe",
+      "width": 720, "height": 820, "minWidth": 680, "minHeight": 760,
+      "x": 160, "y": 80,
+      "transparent": true, "decorations": false, "shadow": false,
+      "alwaysOnTop": true, "visible": true
+    }],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": false, "icon": ["../../tauri-app/src-tauri/icons/icon.ico"] }
+}

@@ -9,6 +9,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "lint": "eslint .",
+    "test": "node --test src/*.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

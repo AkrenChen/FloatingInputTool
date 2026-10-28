@@ -1,0 +1,13 @@
+# 二轮发现草稿
+
+已完成：重复Hide覆盖恢复位置；自动聚焦阻止移出回缩；启动默认可见、原生Close未拦截；贴边物理像素和CSS逻辑像素混用；自定义不透明度被聚焦样式覆盖；自定义把手缺少背景；设置setFocus缺少能力；正文被模板二次替换。
+
+用户已确认：拖到边缘自动dock，移除此项需求偏移判断；贴边展开后Save成功应立即收回原贴边侧，现有保持展开的分支仍待实现。普通窗口保存后完全隐藏。
+
+细节、源码位置、验证证据与边界见review.md。源码提取验证见verify.mjs。
+
+用户全桌面截图明确显示窗口外四个灰色直角；此前WGC单窗口截图不足以证明外部透明。window-vibrancy 0.6在Win11使用DWMWA_SYSTEMBACKDROP_TYPE，旧系统使用accent policy。假设系统背景层未遵守自定义region；下一步验证相同Acrylic通过局部accent policy合成。不得仅凭单窗口截图宣布四角修复。
+
+用户反馈accent Acrylic仍有灰角，材质切换假设不成立，已撤回native_backdrop模块并恢复window-vibrancy Acrylic。新增debug延迟读回：DPI192、主窗口region=3、bounds0,0,1119,719、corner_inside=0；存在TAURI_DRAG_RESIZE_BORDERS及WRY_WEBVIEW两个1120x720子窗口。Tauri源码证实缩放子窗采用独立矩形减中央矩形的ring region。下一假设：子窗口区域未同步圆角，尝试裁剪WebView并将缩放ring与圆角求交，保留ring中空。
+
+用户确认第二灰角候选（主窗及子窗同步region）仍失败。主窗/子窗region角点outside不等价于桌面合成输出透明，当前根因未证实；不能继续声称已找到根因。已经验证原生region、accent材质切换、子窗裁剪均不足以消除四角，停止叠加同类补丁。下一步需用户选择：接受系统控制半径保留磨砂；保留25但取消原生磨砂；或扩大到窗口合成实现。前两条是需求降级，尚未执行。

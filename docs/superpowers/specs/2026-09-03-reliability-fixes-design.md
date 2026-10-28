@@ -115,7 +115,9 @@ Manual Windows verification will cover:
 - Interrupted config, draft, or Markdown writes do not truncate the previous valid file.
 - Production failures leave actionable logs without captured note content.
 
-## Runtime Polish Addendum
+## Runtime Polish Addendum (historical)
+
+Superseded on 2026-10-27: the 22 px HWND region clipping proposal below is retained as history. The current implementation uses DWM native corners and a shared 10 px CSS radius. Custom background opacity is final and does not change with focus; Settings uses an opaque surface.
 
 - Acrylic windows must be clipped at the native HWND level with a DPI-aware 22 px radius so the material cannot remain visible in rectangular CSS corner gaps.
 - Native corner clipping must be refreshed after window size changes and applied to both the main and Settings windows.
@@ -124,3 +126,10 @@ Manual Windows verification will cover:
 - Focus state is application-controlled rather than inferred from Windows Acrylic defaults: focused windows use a high-opacity theme surface for readability, while unfocused windows expose more Acrylic blur as the inactive-state cue.
 - Losing focus triggers a delayed Acrylic refresh because Windows can otherwise replace inactive Acrylic with a flat material.
 - The 22 px native clip targets only the WebView client area. Invisible native resize borders stay outside the rendered region, and internal Tauri resize handles preserve edge/corner resizing without exposing non-client pixels.
+
+## 2026-10-27 用户确认的25px圆角
+
+用户在磨砂外观调整后明确要求25px圆角。此前DWM系统默认圆角方案由本次指定半径替代：CSS使用25逻辑像素，原生client区域采用同半径的DPI换算裁剪，尺寸/缩放改变时刷新，贴边时解除。此前区域裁剪的材质残留问题需要重新验证；验收以实际25px边缘、磨砂材质贴合和可缩放性为准。
+
+## 2026-10-27 最终选择：优先磨砂与稳定
+用户明确接受系统控制的圆角半径，撤回精确25px要求。移除自定义HWND/子窗region、窗口消息子类、角点诊断和配套前端缩放覆盖层，恢复Tauri原生无边框缩放。使用DWM ROUND/DONOTROUND控制普通/贴边形态，CSS圆角采用8px配合系统外观，外轮廓以系统裁剪为准；原生Acrylic与减淡后的外阴影保留。此条覆盖上面的25px指定半径实验。

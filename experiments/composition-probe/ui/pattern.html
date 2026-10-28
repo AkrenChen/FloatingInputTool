@@ -1,0 +1,9 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Live reference</title><style>
+*{box-sizing:border-box}body{margin:0;height:100vh;overflow:hidden;font:18px 'Segoe UI','Microsoft YaHei',sans-serif;background:repeating-linear-gradient(90deg,#f0bc65 0 80px,#65c0e7 80px 160px,#9bd5aa 160px 240px,#e999ae 240px 320px)}
+#grid{position:absolute;inset:0;background-image:linear-gradient(#25314099 1px,transparent 1px),linear-gradient(90deg,#25314099 1px,transparent 1px);background-size:16px 16px}
+header{position:relative;margin:16px;padding:12px;background:#fff;color:#102030}p{margin:4px}#bar{position:absolute;top:160px;bottom:0;width:50px;background:#13283a;animation:sweep 9s linear infinite alternate}@keyframes sweep{from{left:0}to{left:94%}}
+.text{position:relative;display:grid;grid-template-columns:1fr 1fr;gap:34px;margin:30px;font-size:14px;font-weight:700}.text span{padding:12px;background:#ffffffb0}
+</style></head><body><div id="grid"></div><div id="bar"></div><header><strong>独立背景参照窗口 · 实时绘制</strong><p>这是另一个原生窗口，供前方样机采样，不是样机内部背景图片。</p><p id="clock"></p></header><section class="text" id="text"></section><script>
+for(let i=0;i<12;i++){const span=document.createElement('span');span.textContent='背景细字 '+i+' · ABC 0123456789 中文测试';document.querySelector('#text').append(span)}
+setInterval(()=>document.querySelector('#clock').textContent='动态计数 '+Math.floor(performance.now()/100)+' · '+new Date().toLocaleTimeString(),100);
+</script></body></html>

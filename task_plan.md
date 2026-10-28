@@ -98,3 +98,50 @@ Phase 24 complete - Reliability and visual fixes are ready for installation
 
 1. Install `FloatingInputTool_0.2.0_x64-setup.exe` over the existing build.
 2. Confirm the Windows standard corner radius and focused/unfocused appearance on the user's desktop compositor.
+
+## 2026-10-28 Window/composition architecture assessment
+- [x] Inspect current Tauri/WebView2, native Acrylic and docking dependencies.
+- [ ] Verify Microsoft composition APIs and alternative framework limits using primary sources.
+- [ ] Compare options, migration scope and concrete prototype acceptance; assessment only, no app changes.
+Research error: web tool returned HTTP 404; fetching official documentation directly instead.
+
+2026-10-28 assessment status: complete. All three assessment items above completed; official source verification and four-option comparison saved in docs/reviews/2026-10-28/window-composition-assessment.md. No implementation started. Next action, if requested: isolated native-composition feasibility prototype with transparent text input and real background sampling.
+
+## 2026-10-28 Approved composition prototype
+- [x] Build an isolated native-composition probe without migrating production.
+- [x] Verify live background sampling, adjustable additional blur/tint/shadow, corner clipping and actual focus transitions on this machine.
+- [x] Pass release build, fmt, clippy and 2 layout tests; record limits in experiments/composition-probe/README.md and docs/reviews/2026-10-28/acceptance.md.
+- [ ] Production migration remains a separate stage: IME, hit testing, docking, real multi-DPI, lifetime/resource tests and second-machine checks are not accepted yet.
+
+## 2026-10-28 Main composition migration — authorized
+- [ ] Integrate final tuned native composition into the actual main capture window.
+- [ ] Adapt visible content geometry, docking and resizing; preserve business workflows.
+- [ ] Validate code/build first, then inspect candidate using Computer Use. No UI automation during implementation while user uses desktop.
+- [ ] Record actual desktop findings and remaining IME/multi-machine gates; do not install or commit.
+
+## Dock interaction follow-up
+- [ ] Replace frontend-dependent docking timers with native observation, preserving compose/save/drag/settings guards.
+- [ ] Remove docked gray material and invisible interactive strip; verify left/right and focus loss.
+- [ ] Resolve shadow-only input separately from visible capture input; actual cross-application click-through acceptance required.
+
+## Latest scope and accepted result
+User narrowed remaining work to dock-strip appearance after confirming native automatic collapse and removal of gray areas. Preserved trapezoid and vertical text; user accepted new colors, contour and rounded shoulders, requesting only bold text.
+- [x] Native hover/collapse implementation and Rust12/frontend5 checks.
+- [x] User desktop acceptance: inactive/outside collapse works; gray areas gone.
+- [x] Visual design implemented and accepted; label weight700 requested and applied.
+- [ ] Final bold-label bundled candidate refresh.
+Shadow companion/click-through migration remains deferred outside this narrowed visual request. No production installation or commit.
+- [x] Final bold-label bundled candidate refresh completed (release build success).
+
+## First-expansion editor-click regression
+- [x] Trace duplicate drag completion from native settle and delayed frontend mouseup.
+- [x] Consume backend drag completion once, ignore non-drag moved notifications, clear frontend drag ref on dock acknowledgement.
+- [x] Rust13/frontend5 tests, frontend build/lint and fmt/diff checks pass.
+- [ ] Bundled candidate rebuild and real first-hover/editor-click verification.
+Acceptance wording: first hover after dragging to dock, click editor and keep expanded; second cycle same editing behavior; outside/click another window still collapses. Foreground state before click may differ based on Windows activation history and is not forcibly changed by this fix.
+- [x] First-hover/editor-click regression: user confirmed actual desktop retest passed.
+
+## Final settings cleanup and upload
+- [x] Remove temporary Settings tuning UI and unused preview plumbing; keep shared defaults.
+- [x] Fresh frontend lint/build/tests and Rust fmt/tests checks.
+- [ ] Refresh candidate, commit reviewed source/docs and push codex/experience-fixes as authorized.

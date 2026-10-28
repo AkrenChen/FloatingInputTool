@@ -2,21 +2,19 @@
 
 FloatingInputTool is a lightweight Windows tray utility for capturing fleeting notes into an Obsidian markdown file without requiring Obsidian to be open.
 
-The project currently has a working AutoHotkey v2 prototype for core behavior, but the main UI direction is now shifting to Tauri so the final product can match the approved high-fidelity visual design.
+The main application uses Tauri 2, Rust, React 19, and TypeScript. The AutoHotkey v2 prototype remains as a historical behavior reference.
 
-The current prototype includes:
+Current capabilities:
 
-- background tray runtime
-- global hotkey to open a floating input window
-- no normal taskbar presence for the main window
-- separate settings window
-- direct markdown writing with auto-create support
-- prepend-based note insertion using a custom Obsidian `fleeting` callout
-- theme switching with `theme-dark`, `theme-white`, and `follow-system`
+- Background tray startup and global Capture, Hide, and Next Target shortcuts.
+- Capture always opens the editor; closing or hiding preserves the draft.
+- Dragging to a screen edge docks automatically. Hover previews do not request focus.
+- Saving a dock preview collapses to its remembered side; normal saving hides the window.
+- Multiple Markdown targets, configurable templates, Chinese and English UI.
+- White, dark, system, and custom themes.
+- Settings grouped into Capture, Shortcuts, Appearance, and Advanced; unfinished edits survive unrelated config changes.
 
-The next implementation stage is planned in Tauri/WebView so the app can fully reproduce the approved frosted-glass visual style.
-
-The first Tauri scaffold now lives in [tauri-app](D:/Claude/Project/FloatingInputTool/tauri-app).
+See [experience repair acceptance](docs/reviews/2026-10-27/acceptance.md) for verified checks and remaining desktop validation.
 
 ## Why This Exists
 
@@ -86,7 +84,7 @@ The validated product scope still covers:
 - prepend write behavior
 - safe multi-line callout formatting
 - theme selection from both Settings and the tray menu
-- a future side-hide interaction for preserving draft text without writing to markdown
+- side-hide interaction for preserving draft text without writing to markdown
 
 Version 1 intentionally does not include:
 
@@ -123,3 +121,11 @@ The first release is intentionally optimized for a small Windows-only utility. T
 - global hotkey capture
 - direct markdown writing
 - `fleeting` callout output format
+
+## Current Windows surface implementation
+
+The main capture window now uses Windows.UI.Composition for desktop blur, tint, rounded clipping and shadow. Settings retains its independent native backdrop. Shared defaults are in `tauri-app/src/surfaceTheme.json`: focused/inactive interface opacity100%/34%, material coverage100%/85%, shadow opacity24%/10%, shadow blur5, vertical offset2 and corner radius24. Additional Gaussian blur and tint default to0; host backdrop retains system baseline blur.
+
+The temporary tuning panel has been removed from Settings after parameters were finalized. Normal custom-theme controls remain. Native observation controls edge hover/collapse without relying on inactive WebView timers; completion of a drag is consumed once so the first editor click after hover expansion cannot repeat edge docking.
+
+User desktop checks confirmed outside/inactive collapse, removal of docked gray areas and stable first-hover/editor-click behavior on the tested Windows11 machine. Transparent shadow-margin click-through, cross-machine/high-DPI/IME/endurance validation remain open. The independent experiment under `experiments/composition-probe` preserves the earlier feasibility work and its own parameter snapshot.

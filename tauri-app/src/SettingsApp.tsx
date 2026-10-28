@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { emit, listen } from '@tauri-apps/api/event'
-import { getCurrentWindow, Window } from '@tauri-apps/api/window'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import './App.css'
+import { mergeSettingsDraft } from './settingsDraft'
 import type {
   AppConfig,
   CustomTheme,
@@ -35,6 +36,11 @@ const defaultNoteTemplate = `> [!fleeting]+ {{timestamp}}
 {{text.callout}}`
 
 function SettingsApp() {
+  const dirtyKeys = useRef(new Set<string>())
+  const [activeTab, setActiveTab] = useState('record')
+  const mergeField = useCallback(<K extends keyof AppConfig>(key: K, current: AppConfig[K], incoming: AppConfig[K]) =>
+    mergeSettingsDraft({ [key]: current }, { [key]: incoming }, dirtyKeys.current)[key], [])
+
   const [prefersDark, setPrefersDark] = useState(() =>
     window.matchMedia('(prefers-color-scheme: dark)').matches,
   )
@@ -70,14 +76,11 @@ function SettingsApp() {
   const [hasNativeBackdrop, setHasNativeBackdrop] = useState(false)
   const [isWindowFocused, setIsWindowFocused] = useState(true)
 
-  function applyHotkeyConfig(config: AppConfig) {
-    setHotkey(config.hotkey)
-    setHotkeyInput(config.hotkey)
-    setHideHotkey(config.hideHotkey)
-    setHideHotkeyInput(config.hideHotkey)
-    setNextTargetHotkey(config.nextTargetHotkey)
-    setNextTargetHotkeyInput(config.nextTargetHotkey)
-  }
+  const applyHotkeyConfig = useCallback((config: AppConfig) => {
+    setHotkeyInput(current => mergeField('hotkey', current, config.hotkey))
+    setHideHotkeyInput(current => mergeField('hideHotkey', current, config.hideHotkey))
+    setNextTargetHotkeyInput(current => mergeField('nextTargetHotkey', current, config.nextTargetHotkey))
+  }, [mergeField])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -166,14 +169,21 @@ function SettingsApp() {
     const applyConfig = (config: AppConfig) => {
       setThemeMode(config.themeMode)
       setLanguageMode(config.languageMode)
-      setTargets(config.targets)
-      setActiveTargetId(config.activeTargetId)
+      setTargets(current => mergeField('targets', current, config.targets))
+      setActiveTargetId(current => mergeField('activeTargetId', current, config.activeTargetId))
       applyHotkeyConfig(config)
       setSaveShortcutMode(config.saveShortcutMode)
       setNoteTemplate(config.noteTemplate)
-      setNoteTemplateInput(config.noteTemplate)
-      setCustomThemeDraft(config.customTheme)
+      setNoteTemplateInput(current => mergeField('noteTemplate', current, config.noteTemplate))
+      setCustomThemeDraft(current => mergeField('customTheme', current, config.customTheme))
       setSavedCustomTheme(config.customTheme)
+      void invoke<HotkeyRuntimeStatus>('get_hotkey_runtime_status').then(status => {
+        if (!ignore) {
+          setHotkey(status.capture ?? '')
+          setHideHotkey(status.hide ?? '')
+          setNextTargetHotkey(status.nextTarget ?? '')
+        }
+      }).catch(console.error)
     }
 
     const attachAppConfigListener = async () => {
@@ -209,7 +219,13 @@ function SettingsApp() {
       unlistenAppConfigChange?.()
       unlistenNativeBackdrop?.()
     }
-  }, [])
+  }, [applyHotkeyConfig, mergeField])
+
+  useEffect(() => {
+    void emit('custom-theme-preview-changed', {
+      customTheme: isWindowFocused && themeMode === 'custom' ? customThemeDraft : null,
+    })
+  }, [isWindowFocused, themeMode, customThemeDraft])
 
   const resolvedTheme = useMemo<ResolvedTheme>(() => {
     if (themeMode === 'theme-dark') {
@@ -290,11 +306,14 @@ function SettingsApp() {
       const message = error instanceof Error ? error.message : String(error)
       setSettingsFeedback(message)
       setSettingsFeedbackTone('error')
+    } finally {
       setIsSavingTheme(false)
     }
   }
 
   const handleAddTarget = () => {
+    dirtyKeys.current.add('targets')
+    dirtyKeys.current.add('activeTargetId')
     const nextTarget: MarkdownTarget = {
       id: createTargetId(),
       nickname: 'New Target',
@@ -305,12 +324,16 @@ function SettingsApp() {
   }
 
   const handleUpdateTarget = (targetId: string, patch: Partial<MarkdownTarget>) => {
+    dirtyKeys.current.add('targets')
+    dirtyKeys.current.add('activeTargetId')
     setTargets((currentTargets) =>
       currentTargets.map((target) => (target.id === targetId ? { ...target, ...patch } : target)),
     )
   }
 
   const handleRemoveTarget = (targetId: string) => {
+    dirtyKeys.current.add('targets')
+    dirtyKeys.current.add('activeTargetId')
     setTargets((currentTargets) => {
       if (currentTargets.length <= 1) {
         return currentTargets
@@ -325,6 +348,8 @@ function SettingsApp() {
   }
 
   const moveTarget = (draggedId: string, targetId: string, placement: 'before' | 'after') => {
+    dirtyKeys.current.add('targets')
+    dirtyKeys.current.add('activeTargetId')
     if (!draggedId || draggedId === targetId) {
       return
     }
@@ -410,6 +435,8 @@ function SettingsApp() {
       })
       setTargets(config.targets)
       setActiveTargetId(config.activeTargetId)
+      dirtyKeys.current.delete('targets')
+      dirtyKeys.current.delete('activeTargetId')
       setIsEditingTargets(false)
       setSettingsFeedback(text.targetsUpdated)
     } catch (error) {
@@ -426,6 +453,8 @@ function SettingsApp() {
       const config = await invoke<AppConfig>('get_app_config')
       setTargets(config.targets)
       setActiveTargetId(config.activeTargetId)
+      dirtyKeys.current.delete('targets')
+      dirtyKeys.current.delete('activeTargetId')
       setIsEditingTargets(false)
       setSettingsFeedback(text.targetChangesDiscarded)
       setSettingsFeedbackTone('normal')
@@ -445,6 +474,7 @@ function SettingsApp() {
       const response = await invoke<HotkeyUpdateResponse>(hotkeyCommandForField(field), {
         hotkey: hotkeyInputForField(field),
       })
+      dirtyKeys.current.delete(field === 'capture' ? 'hotkey' : field === 'hide' ? 'hideHotkey' : 'nextTargetHotkey')
       applyHotkeyConfig(response.config)
       setActiveHotkeyForField(field, response.activeHotkey ?? '')
 
@@ -546,6 +576,7 @@ function SettingsApp() {
       const config = await invoke<AppConfig>('set_note_template', {
         noteTemplate: noteTemplateInput,
       })
+      dirtyKeys.current.delete('noteTemplate')
       setNoteTemplate(config.noteTemplate)
       setNoteTemplateInput(config.noteTemplate)
       setSettingsFeedback(text.noteTemplateUpdated)
@@ -559,18 +590,21 @@ function SettingsApp() {
   }
 
   const handleCancelNoteTemplate = () => {
+    dirtyKeys.current.delete('noteTemplate')
     setNoteTemplateInput(noteTemplate)
     setSettingsFeedback('')
     setSettingsFeedbackTone('normal')
   }
 
   const handleResetNoteTemplate = () => {
+    dirtyKeys.current.add('noteTemplate')
     setNoteTemplateInput(defaultNoteTemplate)
     setSettingsFeedback('')
     setSettingsFeedbackTone('normal')
   }
 
   const handleCustomThemeDraftChange = (nextCustomTheme: CustomTheme) => {
+    dirtyKeys.current.add('customTheme')
     setCustomThemeDraft(nextCustomTheme)
     if (themeMode === 'custom') {
       void emit('custom-theme-preview-changed', { customTheme: nextCustomTheme })
@@ -586,6 +620,7 @@ function SettingsApp() {
       const config = await invoke<AppConfig>('set_custom_theme', {
         customTheme: customThemeDraft,
       })
+      dirtyKeys.current.delete('customTheme')
       setCustomThemeDraft(config.customTheme)
       setSavedCustomTheme(config.customTheme)
       setSettingsFeedback(text.customThemeSaved)
@@ -599,6 +634,7 @@ function SettingsApp() {
   }
 
   const handleCancelCustomTheme = () => {
+    dirtyKeys.current.delete('customTheme')
     setCustomThemeDraft(savedCustomTheme)
     if (themeMode === 'custom') {
       void emit('custom-theme-preview-changed', { customTheme: savedCustomTheme })
@@ -618,6 +654,7 @@ function SettingsApp() {
       return
     }
 
+    dirtyKeys.current.add(field === 'capture' ? 'hotkey' : field === 'hide' ? 'hideHotkey' : 'nextTargetHotkey')
     if (field === 'hide') {
       setHideHotkeyInput(nextHotkey)
     } else if (field === 'next-target') {
@@ -631,10 +668,8 @@ function SettingsApp() {
 
   const handleClose = async () => {
     try {
-      const mainWindow = await Window.getByLabel('main')
-      await mainWindow?.setEnabled(true)
-      await getCurrentWindow().hide()
-      await mainWindow?.setFocus()
+      await emit('custom-theme-preview-changed', { customTheme: null })
+      await invoke('close_settings_window')
     } catch (error) {
       console.error('Failed to close settings window', error)
     }
@@ -668,8 +703,16 @@ function SettingsApp() {
           </button>
         </div>
 
+        <nav className="settings-tabs" aria-label={text.settingsTitle}>
+          {(['record', 'shortcuts', 'appearance', 'advanced'] as const).map((tab, index) => (
+            <button key={tab} type="button" aria-current={activeTab === tab ? 'page' : undefined}
+              onClick={() => setActiveTab(tab)}>
+              {(languageMode === 'chinese' ? ['记录', '快捷键', '外观', '高级'] : ['Capture', 'Shortcuts', 'Appearance', 'Advanced'])[index]}
+            </button>
+          ))}
+        </nav>
         <div className="settings-content">
-          <div className="settings-section">
+          <div className="settings-section" hidden={activeTab !== 'record'}>
             <div className="settings-label-row">
               <span className="settings-label">{text.markdownTargets}</span>
               <button
@@ -677,7 +720,6 @@ function SettingsApp() {
                 type="button"
                 onClick={() => {
                   setIsTargetListExpanded((isExpanded) => !isExpanded)
-                  setIsEditingTargets(false)
                   setDraggedTargetId('')
                 }}
               >
@@ -686,7 +728,7 @@ function SettingsApp() {
             </div>
             {isTargetListExpanded ? (
               <div className={`target-list-editor ${isEditingTargets ? 'is-editing' : ''}`}>
-                <div className="target-editor-header" aria-hidden="true">
+                <div className="target-editor-header" aria-hidden="true" hidden>
                   <span />
                   <span>{text.nickname}</span>
                   <span>{text.path}</span>
@@ -710,6 +752,7 @@ function SettingsApp() {
                       ||
                     </span>
                     <label className="target-editor-field">
+                      <span className="target-field-label">{text.nickname}</span>
                       <input
                         className="settings-input"
                         type="text"
@@ -719,6 +762,7 @@ function SettingsApp() {
                       />
                     </label>
                     <label className="target-editor-field target-editor-path">
+                      <span className="target-field-label">{text.path}</span>
                       <input
                         className="settings-input"
                         type="text"
@@ -734,7 +778,7 @@ function SettingsApp() {
                           type="radio"
                           checked={target.id === activeTargetId}
                           disabled={!isEditingTargets}
-                          onChange={() => setActiveTargetId(target.id)}
+                          onChange={() => { dirtyKeys.current.add('activeTargetId'); setActiveTargetId(target.id) }}
                         />
                         {text.active}
                       </label>
@@ -766,7 +810,7 @@ function SettingsApp() {
                     >
                       {isSavingTargets ? text.savingTargets : text.saveTargets}
                     </button>
-                    <button className="settings-save-button is-danger" type="button" onClick={handleCancelTargets}>
+                    <button className="settings-save-button is-secondary" type="button" onClick={handleCancelTargets}>
                       {text.cancel}
                     </button>
                   </>
@@ -779,7 +823,7 @@ function SettingsApp() {
             ) : null}
           </div>
 
-          <div className="settings-section">
+          <div className="settings-section" hidden={activeTab !== 'advanced'}>
             <div className="settings-label-row">
               <span className="settings-label">{text.noteTemplate}</span>
               <span className="settings-value">{text.markdown}</span>
@@ -787,7 +831,7 @@ function SettingsApp() {
             <textarea
               className="settings-input note-template-input"
               value={noteTemplateInput}
-              onChange={(event) => setNoteTemplateInput(event.target.value)}
+              onChange={(event) => { dirtyKeys.current.add('noteTemplate'); setNoteTemplateInput(event.target.value) }}
               spellCheck={false}
             />
             <p className="settings-inline-value">
@@ -805,13 +849,13 @@ function SettingsApp() {
               <button className="settings-save-button is-secondary" type="button" onClick={handleResetNoteTemplate}>
                 {text.default}
               </button>
-              <button className="settings-save-button is-danger" type="button" onClick={handleCancelNoteTemplate}>
+              <button className="settings-save-button is-secondary" type="button" onClick={handleCancelNoteTemplate}>
                 {text.cancel}
               </button>
             </div>
           </div>
 
-          <div className="settings-section">
+          <div className="settings-section" hidden={activeTab !== 'shortcuts'}>
             <div className="settings-label-row">
               <span className="settings-label">{text.hotkeys}</span>
               <span className="settings-value">{text.global}</span>
@@ -902,7 +946,7 @@ function SettingsApp() {
             </span>
           </div>
 
-          <div className="settings-section">
+          <div className="settings-section" hidden={activeTab !== 'appearance'}>
             <div className="settings-label-row">
               <span className="settings-label">{text.theme}</span>
               <span className="settings-value">{themeModeLabel}</span>
@@ -1005,7 +1049,7 @@ function SettingsApp() {
             ) : null}
           </div>
 
-          <div className="settings-section">
+          <div className="settings-section" hidden={activeTab !== 'shortcuts'}>
             <div className="settings-label-row">
               <span className="settings-label">{text.saveShortcut}</span>
               <span className="settings-value">
@@ -1031,18 +1075,15 @@ function SettingsApp() {
               })}
             </div>
           </div>
+
+          <footer className="settings-footer" hidden={activeTab !== 'advanced'} aria-label="Copyright">
+            <span>{text.copyrightLine}</span>
+            <span>{text.creatorLine}</span>
+          </footer>
         </div>
-
-        {settingsFeedback ? (
-          <div className={`settings-feedback ${settingsFeedbackTone === 'error' ? 'is-error' : ''}`}>
-            {settingsFeedback}
-          </div>
-        ) : null}
-
-        <footer className="settings-footer" aria-label="Copyright">
-          <span>{text.copyrightLine}</span>
-          <span>{text.creatorLine}</span>
-        </footer>
+        <div className={`settings-feedback ${settingsFeedbackTone === 'error' ? 'is-error' : ''}`} role="status">
+          {settingsFeedback || '\u00a0'}
+        </div>
       </section>
     </main>
   )

@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import './App.css'
+import { defaultFocusEffects, focusEffectVariables, SURFACE_STATE_EVENT, surfaceColor } from './themeEffects'
+import type { SurfaceState } from './themeEffects'
 import type {
   AppConfig,
   AppConfigChangedPayload,
@@ -21,6 +23,9 @@ import type {
   ThemeModeChangedPayload,
 } from './appModel'
 import { uiText } from './appModel'
+import { shouldSubmit, shouldRedock } from './captureBehavior'
+
+const nativeDockObserver = navigator.userAgent.includes('Windows')
 
 function sideHideDebugLog(label: string, details?: Record<string, unknown>) {
   const time = new Date().toISOString()
@@ -45,10 +50,13 @@ function App() {
   const [isDraftLoaded, setIsDraftLoaded] = useState(false)
   const [hasNativeBackdrop, setHasNativeBackdrop] = useState(false)
   const [isWindowFocused, setIsWindowFocused] = useState(true)
+  const [surfaceOpacity, setSurfaceOpacity] = useState(1)
   const [createdAt, setCreatedAt] = useState(() => formatTimestamp(new Date()))
   const [captureFeedback, setCaptureFeedback] = useState('')
   const [isSavingNote, setIsSavingNote] = useState(false)
-  const [isEditorFocused, setIsEditorFocused] = useState(false)
+  const composingRef = useRef(false)
+  const savingRef = useRef(false)
+  const modeRef = useRef<MainWindowMode>('normal')
   const openTimerRef = useRef<number | null>(null)
   const closeTimerRef = useRef<number | null>(null)
   const manualDragActiveRef = useRef(false)
@@ -70,12 +78,13 @@ function App() {
 
   const scheduleRedock = useCallback(
     (reason: string, delayOverride?: number) => {
+      if (nativeDockObserver) return
       if (mainWindowMode !== 'expanded-from-dock') {
         sideHideDebugLog('scheduleRedock skipped: not expanded', { reason, mainWindowMode })
         return
       }
 
-      if (isEditorFocusedRef.current || cursorInsideWindowRef.current) {
+      if (!shouldRedock(modeRef.current, cursorInsideWindowRef.current, composingRef.current, manualDragActiveRef.current, savingRef.current)) {
         sideHideDebugLog('scheduleRedock skipped: blocked by focus/inside', {
           reason,
           isEditorFocused: isEditorFocusedRef.current,
@@ -91,7 +100,7 @@ function App() {
       closeTimerRef.current = window.setTimeout(async () => {
         closeTimerRef.current = null
 
-        if (isEditorFocusedRef.current || cursorInsideWindowRef.current) {
+        if (!shouldRedock(modeRef.current, cursorInsideWindowRef.current, composingRef.current, manualDragActiveRef.current, savingRef.current)) {
           sideHideDebugLog('scheduleRedock fire canceled by focus/inside', {
             reason,
             isEditorFocused: isEditorFocusedRef.current,
@@ -105,7 +114,7 @@ function App() {
             paddingPx: cursorPaddingPx,
           })
           sideHideDebugLog('scheduleRedock fire recheck', { reason, isInside })
-          if (isInside) {
+          if (!shouldRedock(modeRef.current, isInside, composingRef.current, manualDragActiveRef.current, savingRef.current)) {
             return
           }
 
@@ -246,6 +255,7 @@ function App() {
         'main-window-mode-changed',
         (event) => {
           if (!ignore) {
+            modeRef.current = event.payload.mode
             setMainWindowMode(event.payload.mode)
             setDockSide(event.payload.dockSide ?? null)
           }
@@ -305,6 +315,10 @@ function App() {
   useEffect(() => {
     const previousMode = previousMainWindowModeRef.current
 
+    if (mainWindowMode === 'docked-left' || mainWindowMode === 'docked-right') {
+      manualDragActiveRef.current = false
+    }
+
     if (mainWindowMode !== 'docked-left' && mainWindowMode !== 'docked-right' && openTimerRef.current) {
       window.clearTimeout(openTimerRef.current)
       openTimerRef.current = null
@@ -319,11 +333,6 @@ function App() {
       cursorInsideWindowRef.current = true
       clearCloseTimer()
 
-      if (previousMode === 'docked-left' || previousMode === 'docked-right') {
-        window.setTimeout(() => {
-          textareaRef.current?.focus()
-        }, 0)
-      }
     }
 
     if (
@@ -342,13 +351,6 @@ function App() {
     previousMainWindowModeRef.current = mainWindowMode
   }, [clearCloseTimer, dockSide, mainWindowMode])
 
-  useEffect(() => {
-    isEditorFocusedRef.current = isEditorFocused
-    if (isEditorFocused) {
-      clearCloseTimer()
-    }
-  }, [clearCloseTimer, isEditorFocused])
-
   useEffect(
     () => () => {
       if (openTimerRef.current) {
@@ -363,7 +365,7 @@ function App() {
   )
 
   useEffect(() => {
-    if (mainWindowMode !== 'expanded-from-dock') {
+    if (nativeDockObserver || mainWindowMode !== 'expanded-from-dock') {
       cursorInsideWindowRef.current = false
       return
     }
@@ -392,7 +394,7 @@ function App() {
           hasCloseTimer: Boolean(closeTimerRef.current),
         })
 
-        if (isEditorFocusedRef.current || isInside) {
+        if (!shouldRedock(modeRef.current, isInside, composingRef.current, manualDragActiveRef.current, savingRef.current)) {
           clearCloseTimer()
         } else if (!closeTimerRef.current) {
           scheduleRedock('poll-outside')
@@ -453,9 +455,8 @@ function App() {
     return prefersDark ? 'dark' : 'white'
   }, [prefersDark, themeMode])
 
-  const canSaveNote = draft.trim().length > 0 && !isSavingNote
+  const canSaveNote = isDraftLoaded && appConfig !== null && draft.trim().length > 0 && !isSavingNote
   const isDocked = mainWindowMode === 'docked-left' || mainWindowMode === 'docked-right'
-  const isExpandedFromDock = mainWindowMode === 'expanded-from-dock'
   const shouldShowDebugHotzone = appConfig?.debugShowHotzone === 1 && isDocked
   const saveShortcutMode: SaveShortcutMode = appConfig?.saveShortcutMode ?? 'ctrl-enter-save'
   const saveShortcutLabel = saveShortcutMode === 'enter-save' ? 'Enter' : 'Ctrl+Enter'
@@ -463,9 +464,30 @@ function App() {
   const targets = appConfig?.targets ?? []
   const activeTargetId = appConfig?.activeTargetId ?? targets[0]?.id ?? ''
   const text = uiText[languageMode]
+  const surfaceEffects = useMemo(() => defaultFocusEffects(resolvedTheme, customTheme.windowOpacity),
+  [resolvedTheme, customTheme.windowOpacity])
+  const tintColor = resolvedTheme === 'custom' ? customTheme.windowColor : resolvedTheme === 'dark' ? '#121215' : '#f6f6fb'
 
   useEffect(() => {
-    if (!isDraftLoaded) {
+    let disposed = false
+    const attach = listen<SurfaceState>(SURFACE_STATE_EVENT, ({ payload }) => {
+      if (disposed) return
+      setHasNativeBackdrop(payload.available)
+      setIsWindowFocused(payload.focused)
+      setSurfaceOpacity(payload.interfaceOpacity)
+    })
+    void attach.then(() => {
+      if (disposed) return
+      return invoke('update_main_surface', { parameters: {
+        effects: surfaceEffects,
+        color: surfaceColor(tintColor),
+      } })
+    }).catch(error => console.error('Failed to update native surface', error))
+    return () => { disposed = true; void attach.then(unlisten => unlisten()) }
+  }, [surfaceEffects, tintColor])
+
+  useEffect(() => {
+    if (!isDraftLoaded || savingRef.current) {
       return
     }
     const snapshot: DraftSnapshot = {
@@ -501,7 +523,7 @@ function App() {
   }
 
   const handleWindowDragStart = async (event: React.MouseEvent<HTMLElement>) => {
-    if (event.button !== 0) {
+    if (event.button !== 0 || savingRef.current) {
       return
     }
 
@@ -528,6 +550,7 @@ function App() {
   }
 
   const handleHide = async () => {
+    if (savingRef.current) return
     setCaptureFeedback('')
     try {
       await flushCurrentDraft()
@@ -539,6 +562,7 @@ function App() {
   }
 
   const handleClose = async () => {
+    if (savingRef.current) return
     setCaptureFeedback('')
     try {
       await flushCurrentDraft()
@@ -548,19 +572,13 @@ function App() {
     await hideWindow()
   }
 
-  const handleDiscardDraft = async () => {
-    if (!draft && !captureFeedback) {
-      return
-    }
-    if (draft && !window.confirm(text.discardDraftConfirm)) {
-      return
-    }
+  const handleOpenSettings = async () => {
+    if (savingRef.current) return
+    clearOpenTimer()
+    clearCloseTimer()
     try {
-      await invoke('clear_draft')
-      setDraft('')
-      setCreatedAt(formatTimestamp(new Date()))
-      setCaptureFeedback('')
-      window.setTimeout(() => textareaRef.current?.focus(), 0)
+      await flushCurrentDraft()
+      await invoke('open_settings_window')
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setCaptureFeedback(message)
@@ -568,7 +586,7 @@ function App() {
   }
 
   const handleTargetSelect = async (targetId: string) => {
-    if (!targetId || targetId === activeTargetId) {
+    if (savingRef.current || !targetId || targetId === activeTargetId) {
       return
     }
 
@@ -584,30 +602,29 @@ function App() {
   }
 
   const handleSaveNote = async () => {
-    if (!canSaveNote) {
+    if (!canSaveNote || savingRef.current || composingRef.current) {
       return
     }
 
+    savingRef.current = true
+    clearOpenTimer()
+    clearCloseTimer()
     setIsSavingNote(true)
     setCaptureFeedback('')
 
     try {
-      await invoke('save_note', { noteText: draft })
+      await invoke('set_capture_interaction', { saving: true })
+      await invoke('save_note', { noteText: draft, targetId: activeTargetId })
       setDraft('')
       setCreatedAt(formatTimestamp(new Date()))
       setCaptureFeedback(text.savedFeedback)
-      if (isExpandedFromDock) {
-        clearCloseTimer()
-        window.setTimeout(() => {
-          textareaRef.current?.focus()
-        }, 0)
-      } else {
-        await hideWindow()
-      }
+      await invoke('finish_capture')
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setCaptureFeedback(message)
     } finally {
+      void invoke('set_capture_interaction', { saving: false }).catch(console.error)
+      savingRef.current = false
       setIsSavingNote(false)
     }
   }
@@ -632,6 +649,7 @@ function App() {
   }
 
   const handleEditorKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (composingRef.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || savingRef.current) return
     if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.metaKey) {
       return
     }
@@ -642,8 +660,11 @@ function App() {
       return
     }
 
-    const shouldSave = saveShortcutMode === 'enter-save' ? !event.ctrlKey : event.ctrlKey
-    if (!shouldSave) {
+    if (!shouldSubmit({
+      key: event.key, ctrlKey: event.ctrlKey, shiftKey: event.shiftKey,
+      altKey: event.altKey, metaKey: event.metaKey,
+      isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode,
+    }, saveShortcutMode)) {
       return
     }
 
@@ -659,6 +680,7 @@ function App() {
   }
 
   const handleDockHotzoneEnter = () => {
+    if (nativeDockObserver) return
     if (!isDocked) {
       return
     }
@@ -690,6 +712,8 @@ function App() {
   }
 
   const appShellStyle = {
+    ...focusEffectVariables(surfaceEffects),
+    '--capture-interface-opacity': surfaceOpacity,
     '--dock-visible-width': `${appConfig?.visibleHandleWidthPx ?? 22}px`,
     '--dock-hotzone-width': `${appConfig?.hotzoneWidthPx ?? 36}px`,
     '--empty-input-placeholder-color': appConfig?.emptyInputPlaceholderColor ?? '#8A8A8A',
@@ -701,11 +725,13 @@ function App() {
     '--custom-accent-color': customTheme.accentColor,
   } as CSSProperties
 
+  const isSurfaceFocused = isWindowFocused
+
   return (
     <main
-      className={`app-shell theme-${resolvedTheme} lang-${languageMode} ${
-        hasNativeBackdrop ? 'backdrop-native' : 'backdrop-fallback'
-      } ${isWindowFocused ? 'window-focused' : 'window-unfocused'} ${
+      className={`app-shell capture-surface theme-${resolvedTheme} lang-${languageMode} ${
+        hasNativeBackdrop ? 'backdrop-native backdrop-composition' : 'backdrop-fallback'
+      } ${isSurfaceFocused ? 'window-focused' : 'window-unfocused'} ${
         isDocked ? `is-docked dock-${dockSide}` : ''
       } ${
         mainWindowMode === 'expanded-from-dock' ? 'is-expanded-from-dock' : ''
@@ -713,6 +739,15 @@ function App() {
       style={appShellStyle}
     >
       <section className={`floating-window ${isDocked ? 'is-docked' : ''}`} role="dialog" aria-label={text.dialogLabel}>
+        {!isDocked && (['North', 'NorthEast', 'East', 'SouthEast', 'South', 'SouthWest', 'West', 'NorthWest'] as const).map(direction => (
+          <div key={direction} className={`capture-resize-edge resize-${direction.toLowerCase()}`} aria-hidden="true"
+            onMouseDown={event => {
+              if (event.button !== 0) return
+              event.preventDefault()
+              event.stopPropagation()
+              void getCurrentWindow().startResizeDragging(direction).catch(console.error)
+            }} />
+        ))}
         {isDocked ? (
           <div
             className={`dock-shell dock-shell-${dockSide ?? 'left'}`}
@@ -721,6 +756,22 @@ function App() {
           >
             {shouldShowDebugHotzone ? <div className="dock-hotzone-debug" aria-hidden="true" /> : null}
             <div className="dock-handle" aria-hidden="true">
+              <svg className="dock-handle-surface" viewBox="0 0 22 360" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient id="dock-surface-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0" stopColor="var(--dock-fill-top)" />
+                    <stop offset="1" stopColor="var(--dock-fill-bottom)" />
+                  </linearGradient>
+                  <clipPath id="dock-clip-left" clipPathUnits="objectBoundingBox">
+                    <path d="M0 0 L.55 .018 Q.977 .028 .977 .055 L.977 .945 Q.977 .972 .55 .982 L0 1 Z" />
+                  </clipPath>
+                  <clipPath id="dock-clip-right" clipPathUnits="objectBoundingBox">
+                    <path d="M1 0 L.45 .018 Q.023 .028 .023 .055 L.023 .945 Q.023 .972 .45 .982 L1 1 Z" />
+                  </clipPath>
+                </defs>
+                <path d="M0 0 L12.1 6.48 Q21.5 10.08 21.5 19.8 L21.5 340.2 Q21.5 349.92 12.1 353.52 L0 360 Z"
+                  fill="url(#dock-surface-fill)" stroke="var(--dock-outline)" vectorEffect="non-scaling-stroke" />
+              </svg>
               <span className="dock-handle-label">{text.dockLabel}</span>
             </div>
           </div>
@@ -738,6 +789,7 @@ function App() {
                 className="icon-button close-button"
                 type="button"
                 aria-label={text.close}
+                disabled={isSavingNote}
                 onClick={handleClose}
               >
                 &times;
@@ -751,6 +803,7 @@ function App() {
                     key={target.id}
                     className={`target-chip ${target.id === activeTargetId ? 'is-selected' : ''}`}
                     type="button"
+                    disabled={isSavingNote}
                     onClick={() => handleTargetSelect(target.id)}
                   >
                     {targetLabel(target)}
@@ -767,17 +820,26 @@ function App() {
                 aria-label={text.editorLabel}
                 spellCheck={false}
                 value={draft}
+                readOnly={isSavingNote || !isDraftLoaded}
+                onCompositionStart={() => {
+                  composingRef.current = true
+                  void invoke('set_capture_interaction', { composing: true }).catch(console.error)
+                  clearCloseTimer()
+                }}
+                onCompositionEnd={() => {
+                  composingRef.current = false
+                  void invoke('set_capture_interaction', { composing: false }).catch(console.error)
+                  scheduleRedock('composition-end')
+                }}
                 placeholder={text.placeholder}
                 onFocus={() => {
                   isEditorFocusedRef.current = true
                   cursorInsideWindowRef.current = true
-                  setIsEditorFocused(true)
                   sideHideDebugLog('editor focus')
                   clearCloseTimer()
                 }}
                 onBlur={() => {
                   isEditorFocusedRef.current = false
-                  setIsEditorFocused(false)
                   sideHideDebugLog('editor blur', {
                     mainWindowMode,
                     cursorInside: cursorInsideWindowRef.current,
@@ -804,25 +866,20 @@ function App() {
 
               <div className="window-actions">
                 <button
-                  className="icon-button footer-icon-button discard-button"
+                  className="icon-button footer-icon-button settings-button"
                   type="button"
-                  aria-label={text.discardDraft}
-                  title={text.discardDraft}
-                  disabled={!draft}
-                  onClick={handleDiscardDraft}
+                  aria-label={text.settingsTitle}
+                  title={text.settingsTitle}
+                  disabled={isSavingNote}
+                  onClick={handleOpenSettings}
                 >
-                  <svg className="footer-action-icon discard-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path d="M4 7H20" />
-                    <path d="M9 7V4H15V7" />
-                    <path d="M6.5 7L7.5 20H16.5L17.5 7" />
-                    <path d="M10 11V16" />
-                    <path d="M14 11V16" />
-                  </svg>
+                  <span className="footer-action-icon settings-icon" aria-hidden="true" />
                 </button>
                 <button
                   className="icon-button footer-icon-button hide-button"
                   type="button"
                   aria-label={text.hide}
+                  disabled={isSavingNote}
                   onClick={handleHide}
                 >
                   <svg className="footer-action-icon ghost-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">

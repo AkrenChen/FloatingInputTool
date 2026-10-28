@@ -1,0 +1,44 @@
+.app-shell {
+  --capture-surface-opacity: var(--capture-focused-opacity);
+  --capture-editor-opacity: var(--capture-editor-focused-opacity);
+}
+
+.app-shell.theme-white {
+  --capture-surface-color: #f6f6fb;
+  --capture-editor-color: #ffffff;
+}
+
+.app-shell.theme-dark {
+  --capture-surface-color: #121215;
+  --capture-editor-color: #121216;
+}
+
+.app-shell.theme-custom {
+  --capture-surface-color: var(--custom-window-color);
+  --capture-editor-color: var(--custom-window-color);
+}
+
+.app-shell.window-unfocused {
+  --capture-surface-opacity: var(--capture-idle-opacity);
+  --capture-editor-opacity: var(--capture-editor-idle-opacity);
+}
+
+.app-shell.backdrop-native:not(.is-docked) .floating-window {
+  background-image: none;
+  background-color: color-mix(in srgb, var(--capture-surface-color) var(--capture-surface-opacity), transparent);
+  transition:
+    background-color var(--capture-transition-duration) ease,
+    border-color var(--capture-transition-duration) ease;
+}
+
+.app-shell.backdrop-native:not(.is-docked) .editor-shell {
+  background-color: color-mix(in srgb, var(--capture-editor-color) var(--capture-editor-opacity), transparent);
+  transition: background-color var(--capture-transition-duration) ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell .floating-window,
+  .app-shell .editor-shell {
+    transition: none !important;
+  }
+}

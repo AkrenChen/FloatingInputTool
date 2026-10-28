@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Composition probe</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:transparent;color:#1f2937;font:13px 'Segoe UI','Microsoft YaHei',sans-serif;overflow:hidden}
+main{position:absolute;inset:72px;display:flex;flex-direction:column;padding:18px;gap:10px;border:1px solid #ffffff66;border-radius:24px;overflow:auto}
+header{display:flex;align-items:center;justify-content:space-between;cursor:move}h1{font-size:17px;margin:0}p{margin:0;font-size:12px;line-height:1.6}
+button,select{font:inherit;color:inherit;border:1px solid #64748b55;border-radius:7px;padding:5px 9px;background:#ffffff55;cursor:pointer}
+textarea{font:14px/1.6 'Segoe UI','Microsoft YaHei',sans-serif;min-height:90px;flex:1;resize:none;padding:10px;border:1px solid #64748b55;border-radius:8px;background:#ffffff18;color:inherit;outline-offset:2px}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:9px 18px}.control{display:grid;grid-template-columns:1fr auto;gap:3px;font-size:12px}.control input{width:100%;grid-column:1/-1;margin:0;accent-color:#279da7}
+.toolbar{display:flex;gap:7px;flex-wrap:wrap;align-items:center}#status{font-size:11px;overflow-wrap:anywhere;color:#334155}#export{font:11px monospace;min-height:70px;flex:0;display:none}output{font-variant-numeric:tabular-nums}
+</style></head><body><main id="panel"><header data-tauri-drag-region><h1 data-tauri-drag-region>原生合成 · 独立验证样机</h1><button id="close" aria-label="关闭样机">×</button></header>
+<p>不读取正式版草稿，不保存笔记。0 表示不附加模糊，仍保留系统基础磨砂；编辑文字应始终清晰。</p>
+<div class="toolbar"><label>预览 <select id="preview"><option value="follow">跟随焦点</option><option value="focused">模拟聚焦</option><option value="idle">模拟失焦</option></select></label><button id="reset">恢复默认</button><button id="showExport">显示参数</button></div>
+<textarea aria-label="样机临时输入区" placeholder="在这里测试中文输入、多行、全选与删除。关闭后不保留。"></textarea>
+<section class="controls" id="controls"></section><textarea id="export" aria-label="样机参数" readonly></textarea><p id="renderState" aria-live="polite"></p><p id="status" role="status">等待原生合成状态…</p></main>
+<script>
+const defaults={focusedBlur:0,idleBlur:0,focusedTint:0,idleTint:0,focusedOpacity:1,idleOpacity:.34,focusedMaterialOpacity:1,idleMaterialOpacity:.85,shadowBlur:5,shadowOpacity:.24,shadowY:2,cornerRadius:24,preview:'follow'};
+let parameters={...defaults};let sending=false,pending=false;
+const fields=[['focusedOpacity','聚焦文字/按钮不透明度',.1,1,.01],['idleOpacity','失焦文字/按钮不透明度',.1,1,.01],['focusedMaterialOpacity','聚焦磨砂覆盖强度',0,1,.01],['idleMaterialOpacity','失焦磨砂覆盖强度',0,1,.01],['focusedBlur','聚焦附加模糊（标准差）',0,64,1],['idleBlur','失焦附加模糊（标准差）',0,64,1],['focusedTint','聚焦底板浓度',0,1,.01],['idleTint','失焦底板浓度',0,1,.01],['shadowBlur','阴影模糊范围',0,24,1],['shadowOpacity','阴影浓度',0,1,.01],['shadowY','阴影垂直偏移',-12,12,1],['cornerRadius','圆角半径',0,32,1]];
+const controls=document.querySelector('#controls'),status=document.querySelector('#status');
+for(const [key,label,min,max,step] of fields){const item=document.createElement('label');item.className='control';const title=document.createElement('span');title.textContent=label;const output=document.createElement('output');output.id=key+'Value';const input=document.createElement('input');Object.assign(input,{type:'range',id:key,min,max,step,value:parameters[key]});input.setAttribute('aria-label',label);input.oninput=()=>{parameters[key]=Number(input.value);refresh();send()};item.append(title,output,input);controls.append(item)}
+function refresh(){for(const [key] of fields){document.getElementById(key).value=parameters[key];document.getElementById(key+'Value').textContent=/Opacity|Tint/.test(key)?Math.round(parameters[key]*100)+'%':parameters[key]}document.querySelector('#preview').value=parameters.preview;document.querySelector('#panel').style.borderRadius=parameters.cornerRadius+'px';document.querySelector('#export').value=JSON.stringify(parameters,null,2)}
+function showApplied(state){document.querySelector('#panel').style.opacity=state.interfaceOpacity;document.querySelector('#renderState').textContent=`当前使用${state.active?'聚焦':'失焦'}参数 · 界面 ${Math.round(state.interfaceOpacity*100)}% · 磨砂 ${Math.round(state.materialOpacity*100)}% · 附加模糊 ${state.blur} · 底板 ${Math.round(state.tint*100)}% · 阴影 ${state.shadowBlur} / ${Math.round(state.shadowOpacity*100)}%`}
+async function send(){pending=true;if(sending)return;sending=true;try{while(pending){pending=false;showApplied(await window.__TAURI__.core.invoke('update_parameters',{parameters:{...parameters}}))}}catch(e){status.textContent=String(e)}finally{sending=false}}
+document.querySelector('#preview').onchange=e=>{parameters.preview=e.target.value;refresh();send()};document.querySelector('#reset').onclick=()=>{parameters={...defaults};refresh();send()};document.querySelector('#showExport').onclick=()=>{const box=document.querySelector('#export');box.style.display=box.style.display==='block'?'none':'block'};
+document.querySelector('#close').onclick=()=>window.__TAURI__.window.getCurrentWindow().close();
+refresh();window.__TAURI__.event.listen('probe-status',event=>status.textContent=event.payload);window.__TAURI__.event.listen('probe-render-state',event=>showApplied(event.payload));window.__TAURI__.core.invoke('probe_status').then(text=>status.textContent=text);send();
+</script></body></html>

@@ -1,6 +1,19 @@
+mod window_behavior;
+use window_behavior::{
+    logical_px_to_physical, DockSide, MainWindowMode, MainWindowRuntimeState, StoredWindowBounds,
+};
+#[cfg(windows)]
+mod acrylic;
 mod config;
 mod draft;
+#[cfg(windows)]
+mod native_composition;
+mod native_dock;
+#[cfg(windows)]
+mod native_effects;
 mod storage;
+mod surface;
+mod surface_runtime;
 
 use config::{
     default_app_config, load_app_config, normalize_targets, sanitize_custom_theme,
@@ -9,7 +22,10 @@ use config::{
     DEFAULT_NOTE_TEMPLATE,
 };
 use draft::{load_draft, save_draft, DraftSnapshot};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Mutex, MutexGuard,
+};
 use std::{fs, path::Path, str::FromStr};
 use std::{
     thread,
@@ -77,40 +93,9 @@ struct TrayMenuItems {
     language: LanguageMenuItems,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-enum DockSide {
-    Left,
-    Right,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-enum MainWindowMode {
-    #[default]
-    Normal,
-    DockedLeft,
-    DockedRight,
-    ExpandedFromDock,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct StoredWindowBounds {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-}
-
-#[derive(Debug, Clone, Default)]
-struct MainWindowRuntimeState {
-    mode: MainWindowMode,
-    dock_side: Option<DockSide>,
-    normal_bounds: Option<StoredWindowBounds>,
-    docked_bounds: Option<StoredWindowBounds>,
-}
-
 struct AppState {
+    composing: AtomicBool,
+    saving: AtomicBool,
     config: Mutex<AppConfig>,
     tray_menu_items: TrayMenuItems,
     active_hotkeys: Mutex<ActiveHotkeys>,
@@ -120,7 +105,9 @@ struct AppState {
     draft_save_generation: Mutex<u64>,
     native_backdrop: Mutex<NativeBackdropState>,
     main_window_state: Mutex<MainWindowRuntimeState>,
-    auto_dock_generation: Mutex<u64>,
+    auto_dock_schedule: Mutex<AutoDockSchedule>,
+    transition_lock: Mutex<()>,
+    transition_generation: AtomicU64,
     manual_drag_in_progress: Mutex<bool>,
     auto_dock_suppressed_until_ms: Mutex<u128>,
 }
@@ -286,6 +273,16 @@ fn get_native_backdrop_status(
 }
 
 #[tauri::command]
+fn update_main_surface(
+    app: AppHandle,
+    parameters: surface_runtime::SurfaceRequest,
+) -> Result<(), String> {
+    parameters.effects.validate()?;
+    surface_runtime::refresh(&app, Some(parameters));
+    Ok(())
+}
+
+#[tauri::command]
 fn update_draft(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -327,11 +324,6 @@ fn update_draft(
 #[tauri::command]
 fn flush_draft(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     flush_draft_inner(&app, &state)
-}
-
-#[tauri::command]
-fn clear_draft(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    clear_draft_inner(&app, &state)
 }
 
 fn flush_draft_inner<R: Runtime>(
@@ -744,7 +736,12 @@ fn set_note_template(
 }
 
 #[tauri::command]
-fn save_note(app: AppHandle, state: State<'_, AppState>, note_text: String) -> Result<(), String> {
+fn save_note(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    note_text: String,
+    target_id: String,
+) -> Result<(), String> {
     if note_text.trim().is_empty() {
         return Err(String::from("note content cannot be empty"));
     }
@@ -755,22 +752,18 @@ fn save_note(app: AppHandle, state: State<'_, AppState>, note_text: String) -> R
         .map_err(|error| format!("failed to lock app state: {error}"))?
         .clone();
 
-    let target_file_path = active_target_file_path(&config);
+    let target_file_path = config
+        .targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .map(|target| target.path.clone())
+        .ok_or_else(|| format!("save target {target_id} is missing"))?;
     let note_block = format_note_block(&note_text, &config.note_template);
     prepend_to_file(&target_file_path, &note_block)?;
     if let Err(error) = clear_draft_inner(&app, &state) {
         log::error!("note saved but persisted draft could not be cleared: {error}");
     }
     Ok(())
-}
-
-fn active_target_file_path(config: &AppConfig) -> String {
-    config
-        .targets
-        .iter()
-        .find(|target| target.id == config.active_target_id)
-        .map(|target| target.path.clone())
-        .unwrap_or_else(|| config.target_file_path.clone())
 }
 
 fn activate_next_target<R: Runtime>(app: &AppHandle<R>) -> Result<AppConfig, String> {
@@ -815,13 +808,10 @@ fn begin_manual_window_drag(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn end_manual_window_drag(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    {
-        let mut is_dragging = state
-            .manual_drag_in_progress
-            .lock()
-            .map_err(|error| format!("failed to lock manual drag state: {error}"))?;
-        *is_dragging = false;
+async fn end_manual_window_drag(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if !window_behavior::finish_manual_drag(&state.manual_drag_in_progress)? {
+        log::debug!("ignored duplicate manual drag completion");
+        return Ok(());
     }
 
     sync_main_window_mode_after_move(&app)
@@ -832,8 +822,21 @@ fn is_cursor_inside_main_window(app: AppHandle, padding_px: Option<i32>) -> Resu
     let window = app
         .get_webview_window(WINDOW_LABEL_MAIN)
         .ok_or_else(|| String::from("main window is missing"))?;
-    let bounds = capture_window_bounds(&window)?;
-    let padding = padding_px.unwrap_or(0).max(0);
+    let mut bounds = capture_window_bounds(&window)?;
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let docked = app
+        .state::<AppState>()
+        .main_window_state
+        .lock()
+        .map(|runtime| runtime.mode.is_docked())
+        .unwrap_or(false);
+    if !docked {
+        bounds = surface::visible_bounds(
+            bounds,
+            logical_px_to_physical(surface::SHADOW_INSET, scale) as i32,
+        );
+    }
+    let padding = logical_px_to_physical(padding_px.unwrap_or(0).max(0) as u32, scale) as i32;
 
     let Some((cursor_x, cursor_y)) = current_cursor_position() else {
         return Ok(false);
@@ -859,12 +862,21 @@ fn is_cursor_inside_main_window(app: AppHandle, padding_px: Option<i32>) -> Resu
 }
 
 #[tauri::command]
-fn hide_or_dock_main_window(app: AppHandle) -> Result<(), String> {
+async fn hide_or_dock_main_window(app: AppHandle) -> Result<(), String> {
     hide_or_dock_main_window_inner(&app)
 }
 
 fn hide_or_dock_main_window_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let state = app.state::<AppState>();
+    let transition = begin_window_transition(&state)?;
+    let runtime_state = state
+        .main_window_state
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    if runtime_state.mode.is_docked() {
+        return Ok(());
+    }
     let config = state
         .config
         .lock()
@@ -897,18 +909,13 @@ fn hide_or_dock_main_window_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), 
         compute_docked_bounds(&window, &current_bounds, &config)?
     {
         suppress_auto_dock_for(&state, WINDOW_BOUNDS_ANIMATION_MS + AUTO_DOCK_SETTLE_MS)?;
-        apply_window_bounds_animated(&window, current_bounds, docked_bounds)?;
+        apply_window_bounds_animated(&window, current_bounds, docked_bounds, &transition)?;
         set_window_resizable(&window, false)?;
         settle_window_bounds_animation();
         update_main_window_runtime_state(
             app,
             &state,
-            MainWindowRuntimeState {
-                mode: dock_side.to_docked_mode(),
-                dock_side: Some(dock_side),
-                normal_bounds: Some(current_bounds),
-                docked_bounds: Some(docked_bounds),
-            },
+            runtime_state.dock(dock_side, current_bounds, docked_bounds),
         )?;
     } else {
         window
@@ -930,7 +937,18 @@ fn hide_or_dock_main_window_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), 
 }
 
 #[tauri::command]
-fn restore_docked_main_window(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+async fn restore_docked_main_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    restore_docked_main_window_inner(&app, &state)
+}
+
+fn restore_docked_main_window_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
+    let transition = begin_window_transition(&state)?;
     let window = app
         .get_webview_window(WINDOW_LABEL_MAIN)
         .ok_or_else(|| String::from("main window is missing"))?;
@@ -957,8 +975,8 @@ fn restore_docked_main_window(app: AppHandle, state: State<'_, AppState>) -> Res
         WINDOW_BOUNDS_ANIMATION_MS + (AUTO_DOCK_SETTLE_MS * 3),
     )?;
     update_main_window_runtime_state(
-        &app,
-        &state,
+        app,
+        state,
         MainWindowRuntimeState {
             mode: MainWindowMode::ExpandedFromDock,
             dock_side: runtime_state.dock_side,
@@ -966,7 +984,12 @@ fn restore_docked_main_window(app: AppHandle, state: State<'_, AppState>) -> Res
             docked_bounds: runtime_state.docked_bounds,
         },
     )?;
-    apply_window_bounds_animated(&window, capture_window_bounds(&window)?, normal_bounds)?;
+    apply_window_bounds_animated(
+        &window,
+        capture_window_bounds(&window)?,
+        normal_bounds,
+        &transition,
+    )?;
     set_window_resizable(&window, true)?;
     log::info!(
         "[side-hide] restore_docked_main_window normal_bounds=({}, {}, {}, {}) mode_before={:?}",
@@ -976,93 +999,62 @@ fn restore_docked_main_window(app: AppHandle, state: State<'_, AppState>) -> Res
         normal_bounds.height,
         runtime_state.mode
     );
-    window
-        .show()
-        .map_err(|error| format!("failed to show restored main window: {error}"))?;
-    window
-        .set_focus()
-        .map_err(|error| format!("failed to focus restored main window: {error}"))?;
 
     Ok(())
 }
 
 #[tauri::command]
-fn redock_main_window(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let window = app
-        .get_webview_window(WINDOW_LABEL_MAIN)
-        .ok_or_else(|| String::from("main window is missing"))?;
-    let config = state
-        .config
-        .lock()
-        .map_err(|error| format!("failed to lock app config: {error}"))?
-        .clone();
+async fn redock_main_window(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let transition = begin_window_transition(&state)?;
+    redock_remembered(&app, &state, &transition)
+}
 
-    let runtime_state = state
+fn redock_remembered<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+    transition: &WindowTransition<'_>,
+) -> Result<(), String> {
+    let runtime = state
         .main_window_state
         .lock()
-        .map_err(|error| format!("failed to lock main window state: {error}"))?
+        .map_err(|error| error.to_string())?
         .clone();
-    let current_bounds = capture_window_bounds(&window)?;
-    log::info!(
-        "[side-hide] redock_main_window current_bounds=({}, {}, {}, {}) mode_before={:?}",
-        current_bounds.x,
-        current_bounds.y,
-        current_bounds.width,
-        current_bounds.height,
-        runtime_state.mode
-    );
+    let Some((side, bounds)) = runtime.capture_finished_dock() else {
+        return Ok(());
+    };
+    let window = app
+        .get_webview_window(WINDOW_LABEL_MAIN)
+        .ok_or("main window is missing")?;
+    suppress_auto_dock_for(state, WINDOW_BOUNDS_ANIMATION_MS + AUTO_DOCK_SETTLE_MS)?;
+    apply_window_bounds_animated(&window, capture_window_bounds(&window)?, bounds, transition)?;
+    set_window_resizable(&window, false)?;
+    update_main_window_runtime_state(
+        app,
+        state,
+        MainWindowRuntimeState {
+            mode: side.to_docked_mode(),
+            ..runtime
+        },
+    )
+}
 
-    if let Some((dock_side, docked_bounds)) =
-        compute_docked_bounds(&window, &current_bounds, &config)?
-    {
-        log::info!(
-            "[side-hide] redock_main_window docking side={:?} docked_bounds=({}, {}, {}, {})",
-            dock_side,
-            docked_bounds.x,
-            docked_bounds.y,
-            docked_bounds.width,
-            docked_bounds.height
-        );
-        suppress_auto_dock_for(&state, WINDOW_BOUNDS_ANIMATION_MS + AUTO_DOCK_SETTLE_MS)?;
-        apply_window_bounds_animated(&window, current_bounds, docked_bounds)?;
-        set_window_resizable(&window, false)?;
-        settle_window_bounds_animation();
-        update_main_window_runtime_state(
-            &app,
-            &state,
-            MainWindowRuntimeState {
-                mode: dock_side.to_docked_mode(),
-                dock_side: Some(dock_side),
-                normal_bounds: Some(current_bounds),
-                docked_bounds: Some(docked_bounds),
-            },
-        )
-    } else {
-        log::info!(
-            "[side-hide] redock_main_window canceled because current position is not dockable"
-        );
-        update_main_window_runtime_state(
-            &app,
-            &state,
-            MainWindowRuntimeState {
-                mode: MainWindowMode::Normal,
-                dock_side: None,
-                normal_bounds: Some(current_bounds),
-                docked_bounds: None,
-            },
-        )?;
-
-        if runtime_state.mode != MainWindowMode::Normal {
-            set_window_resizable(&window, true)?;
-            window.show().map_err(|error| {
-                format!("failed to keep main window visible after canceling dock: {error}")
-            })?;
-            window.set_focus().map_err(|error| {
-                format!("failed to focus main window after canceling dock: {error}")
-            })?;
-        }
-
+#[tauri::command]
+async fn finish_capture(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let transition = begin_window_transition(&state)?;
+    let mode = state
+        .main_window_state
+        .lock()
+        .map_err(|error| error.to_string())?
+        .mode;
+    if mode == MainWindowMode::ExpandedFromDock {
+        redock_remembered(&app, &state, &transition)
+    } else if mode.is_docked() {
         Ok(())
+    } else {
+        app.get_webview_window(WINDOW_LABEL_MAIN)
+            .ok_or("main window is missing")?
+            .hide()
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -1105,7 +1097,15 @@ fn sync_language_menu_items(
 
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let state = app.state::<AppState>();
-    restore_main_window_to_normal(app, &state)?;
+    let _transition = begin_window_transition(&state)?;
+    show_main_window_inner(app, &state)
+}
+
+fn show_main_window_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
+    restore_main_window_to_normal(app, state)?;
 
     if let Some(settings_window) = app.get_webview_window(WINDOW_LABEL_SETTINGS) {
         if settings_window.is_visible().unwrap_or(false) {
@@ -1132,19 +1132,6 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     app.emit(EVENT_FOCUS_MAIN_EDITOR, ())
         .map_err(|error| format!("failed to focus main editor: {error}"))?;
 
-    let app_handle = app.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(40));
-        if let Some(window) = app_handle.get_webview_window(WINDOW_LABEL_MAIN) {
-            if let Err(error) = focus_main_window(&window) {
-                log::warn!("delayed main window focus failed: {error}");
-            }
-            if let Err(error) = app_handle.emit(EVENT_FOCUS_MAIN_EDITOR, ()) {
-                log::warn!("delayed main editor focus failed: {error}");
-            }
-        }
-    });
-
     Ok(())
 }
 
@@ -1166,10 +1153,15 @@ fn focus_main_window<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String
 
     window
         .set_focus()
-        .map_err(|error| format!("failed to focus main window: {error}"))
+        .map_err(|error| format!("failed to focus main window: {error}"))?;
+    Ok(())
 }
 
 fn update_native_backdrop<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>) {
+    if window.label() == WINDOW_LABEL_MAIN {
+        surface_runtime::refresh(app, None);
+        return;
+    }
     let available = apply_native_backdrop(window);
     apply_native_corner_preference(window, true);
     let state = app.state::<AppState>();
@@ -1190,13 +1182,13 @@ fn update_native_backdrop<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow
 
 #[cfg(windows)]
 fn apply_native_corner_preference<R: Runtime>(window: &WebviewWindow<R>, rounded: bool) {
+    if window.label() == WINDOW_LABEL_MAIN {
+        return;
+    }
     let hwnd = match window.hwnd() {
         Ok(hwnd) => hwnd,
         Err(error) => {
-            log::warn!(
-                "failed to resolve window handle for native corners on {}: {error}",
-                window.label()
-            );
+            log::warn!("failed to resolve native corner window: {error}");
             return;
         }
     };
@@ -1215,7 +1207,7 @@ fn apply_native_corner_preference<R: Runtime>(window: &WebviewWindow<R>, rounded
     };
     if result < 0 {
         log::warn!(
-            "native corner preference unavailable for window {}: HRESULT {result:#010x}",
+            "native corner preference unavailable for {}: HRESULT {result:#010x}",
             window.label()
         );
     }
@@ -1229,6 +1221,9 @@ fn apply_native_backdrop<R: Runtime>(window: &WebviewWindow<R>) -> bool {
     let is_remote_session = unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 };
     if is_remote_session {
         let _ = window_vibrancy::clear_acrylic(window);
+        if let Ok(hwnd) = window.hwnd() {
+            let _ = acrylic::set_enabled(hwnd.0 as _, false);
+        }
         log::info!(
             "native Acrylic disabled for remote session window {}",
             window.label()
@@ -1237,6 +1232,22 @@ fn apply_native_backdrop<R: Runtime>(window: &WebviewWindow<R>) -> bool {
     }
 
     let _ = window_vibrancy::clear_acrylic(window);
+    if window.label() == WINDOW_LABEL_MAIN {
+        let result = window
+            .hwnd()
+            .map_err(|error| error.to_string())
+            .and_then(|hwnd| acrylic::set_enabled(hwnd.0 as _, true));
+        return match result {
+            Ok(()) => {
+                log::info!("accent Acrylic enabled for window {}", window.label());
+                true
+            }
+            Err(error) => {
+                log::warn!("accent Acrylic unavailable for {}: {error}", window.label());
+                false
+            }
+        };
+    }
     match window_vibrancy::apply_acrylic(window, None) {
         Ok(()) => {
             log::info!("native Acrylic enabled for window {}", window.label());
@@ -1257,10 +1268,32 @@ fn apply_native_backdrop<R: Runtime>(_window: &WebviewWindow<R>) -> bool {
     false
 }
 
-fn open_settings<R: Runtime>(app: &AppHandle<R>) {
-    if let Err(error) = open_or_focus_settings_window(app) {
-        log::error!("{error}");
+fn dispatch_window_action<R: Runtime>(
+    app: &AppHandle<R>,
+    action: fn(&AppHandle<R>) -> Result<(), String>,
+) {
+    let app = app.clone();
+    thread::spawn(move || {
+        if let Err(error) = action(&app) {
+            log::warn!("{error}");
+        }
+    });
+}
+
+fn hide_main_window_to_background<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _transition = begin_window_transition(&state)?;
+    if let Err(error) = flush_draft_inner(app, &state) {
+        log::warn!("{error}");
     }
+    app.get_webview_window(WINDOW_LABEL_MAIN)
+        .ok_or("main window is missing")?
+        .hide()
+        .map_err(|error| error.to_string())
+}
+
+fn open_settings<R: Runtime>(app: &AppHandle<R>) {
+    dispatch_window_action(app, open_or_focus_settings_window);
 }
 
 fn handle_global_hotkey<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut) {
@@ -1275,14 +1308,10 @@ fn handle_global_hotkey<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut) {
 
     match action {
         Some(GlobalHotkeyAction::Capture) => {
-            if let Err(error) = show_main_window(app) {
-                log::warn!("{error}");
-            }
+            dispatch_window_action(app, show_main_window);
         }
         Some(GlobalHotkeyAction::Hide) => {
-            if let Err(error) = hide_or_dock_main_window_inner(app) {
-                log::warn!("{error}");
-            }
+            dispatch_window_action(app, hide_or_dock_main_window_inner);
         }
         Some(GlobalHotkeyAction::NextTarget) => {
             if let Err(error) = activate_next_target(app) {
@@ -1298,8 +1327,28 @@ fn handle_global_hotkey<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut) {
 fn enable_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(main_window) = app.get_webview_window(WINDOW_LABEL_MAIN) {
         let _ = main_window.set_enabled(true);
-        let _ = main_window.set_focus();
+        let _ = focus_main_window(&main_window);
+        let _ = app.emit(EVENT_FOCUS_MAIN_EDITOR, ());
     }
+}
+
+#[tauri::command]
+async fn open_settings_window(app: AppHandle) -> Result<(), String> {
+    open_or_focus_settings_window(&app)
+}
+
+#[tauri::command]
+async fn close_settings_window(app: AppHandle) -> Result<(), String> {
+    close_settings_window_inner(&app)
+}
+
+fn close_settings_window_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _transition = begin_window_transition(&state)?;
+    if let Some(window) = app.get_webview_window(WINDOW_LABEL_SETTINGS) {
+        window.hide().map_err(|error| error.to_string())?;
+    }
+    show_main_window_inner(app, &state)
 }
 
 fn attach_settings_window_events<R: Runtime>(
@@ -1308,7 +1357,16 @@ fn attach_settings_window_events<R: Runtime>(
 ) {
     let app_handle = app.clone();
     settings_window.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { api, .. } => {
+            api.prevent_close();
+            dispatch_window_action(&app_handle, close_settings_window_inner);
+        }
         WindowEvent::Destroyed => enable_main_window(&app_handle),
+        WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            if let Some(window) = app_handle.get_webview_window(WINDOW_LABEL_SETTINGS) {
+                apply_native_corner_preference(&window, true);
+            }
+        }
         _ => {}
     });
 }
@@ -1317,6 +1375,24 @@ fn attach_main_window_events<R: Runtime>(app: &AppHandle<R>, main_window: &Webvi
     let app_handle = app.clone();
     main_window.on_window_event(move |event| match event {
         WindowEvent::Moved(_) => schedule_main_window_auto_dock(&app_handle),
+        WindowEvent::Focused(_) => surface_runtime::refresh(&app_handle, None),
+        WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            let state = app_handle.state::<AppState>();
+            let rounded = state
+                .main_window_state
+                .lock()
+                .map(|runtime| !runtime.mode.is_docked())
+                .unwrap_or(true);
+            if let Some(window) = app_handle.get_webview_window(WINDOW_LABEL_MAIN) {
+                apply_native_corner_preference(&window, rounded);
+            }
+            surface_runtime::refresh(&app_handle, None);
+        }
+        WindowEvent::CloseRequested { api, .. } => {
+            api.prevent_close();
+            dispatch_window_action(&app_handle, hide_main_window_to_background);
+        }
+        WindowEvent::Destroyed => surface_runtime::clear(),
         _ => {}
     });
 }
@@ -1349,7 +1425,9 @@ fn build_settings_window<R: Runtime>(
 }
 
 fn open_or_focus_settings_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    show_main_window(app)?;
+    let state = app.state::<AppState>();
+    let _transition = begin_window_transition(&state)?;
+    show_main_window_inner(app, &state)?;
 
     let main_window = app
         .get_webview_window(WINDOW_LABEL_MAIN)
@@ -1384,9 +1462,7 @@ fn open_or_focus_settings_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         MENU_ID_SHOW => {
-            if let Err(error) = show_main_window(app) {
-                log::error!("{error}");
-            }
+            dispatch_window_action(app, show_main_window);
         }
         MENU_ID_SETTINGS => open_settings(app),
         MENU_ID_THEME_FOLLOW_SYSTEM => {
@@ -1559,9 +1635,7 @@ fn create_tray(app: &AppHandle, config: &AppConfig) -> Result<TrayMenuItems, Str
                 ..
             } = event
             {
-                if let Err(error) = show_main_window(tray.app_handle()) {
-                    log::error!("{error}");
-                }
+                dispatch_window_action(tray.app_handle(), show_main_window);
             }
         })
         .build(app)
@@ -1705,6 +1779,7 @@ fn hotkey_action_label(action: GlobalHotkeyAction) -> &'static str {
 
 fn sync_main_window_mode_after_move<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let state = app.state::<AppState>();
+    let transition = begin_window_transition(&state)?;
     let suppressed_until = *state
         .auto_dock_suppressed_until_ms
         .lock()
@@ -1754,7 +1829,7 @@ fn sync_main_window_mode_after_move<R: Runtime>(app: &AppHandle<R>) -> Result<()
                 compute_docked_bounds(&window, &current_bounds, &config)?
             {
                 suppress_auto_dock_for(&state, WINDOW_BOUNDS_ANIMATION_MS + AUTO_DOCK_SETTLE_MS)?;
-                apply_window_bounds_animated(&window, current_bounds, docked_bounds)?;
+                apply_window_bounds_animated(&window, current_bounds, docked_bounds, &transition)?;
                 set_window_resizable(&window, false)?;
                 settle_window_bounds_animation();
                 update_main_window_runtime_state(
@@ -1776,7 +1851,7 @@ fn sync_main_window_mode_after_move<R: Runtime>(app: &AppHandle<R>) -> Result<()
                 compute_docked_bounds(&window, &current_bounds, &config)?
             {
                 suppress_auto_dock_for(&state, WINDOW_BOUNDS_ANIMATION_MS + AUTO_DOCK_SETTLE_MS)?;
-                apply_window_bounds_animated(&window, current_bounds, docked_bounds)?;
+                apply_window_bounds_animated(&window, current_bounds, docked_bounds, &transition)?;
                 set_window_resizable(&window, false)?;
                 settle_window_bounds_animation();
                 update_main_window_runtime_state(
@@ -1808,65 +1883,88 @@ fn sync_main_window_mode_after_move<R: Runtime>(app: &AppHandle<R>) -> Result<()
     }
 }
 
+#[derive(Default)]
+struct AutoDockSchedule {
+    deadline: Option<Instant>,
+    running: bool,
+}
+
 fn schedule_main_window_auto_dock<R: Runtime>(app: &AppHandle<R>) {
-    let next_generation = {
-        let state = app.state::<AppState>();
-        let mut generation = match state.auto_dock_generation.lock() {
-            Ok(generation) => generation,
-            Err(error) => {
-                log::warn!("failed to lock auto dock generation: {error}");
-                return;
-            }
-        };
-        *generation += 1;
-        *generation
+    let state = app.state::<AppState>();
+    let Ok(mut schedule) = state.auto_dock_schedule.lock() else {
+        return;
     };
-
-    let app_handle = app.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(AUTO_DOCK_SETTLE_MS));
-
-        let state = app_handle.state::<AppState>();
-        let current_generation = match state.auto_dock_generation.lock() {
-            Ok(generation) => *generation,
-            Err(error) => {
-                log::warn!("failed to lock auto dock generation after delay: {error}");
-                return;
-            }
+    schedule.deadline = Some(Instant::now() + Duration::from_millis(AUTO_DOCK_SETTLE_MS));
+    if schedule.running {
+        return;
+    }
+    schedule.running = true;
+    drop(schedule);
+    let app = app.clone();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(16));
+        let state = app.state::<AppState>();
+        let Ok(mut schedule) = state.auto_dock_schedule.lock() else {
+            return;
         };
-
-        if current_generation != next_generation {
+        if schedule
+            .deadline
+            .is_some_and(|deadline| Instant::now() < deadline)
+            || is_left_mouse_button_down()
+        {
+            continue;
+        }
+        schedule.deadline = None;
+        drop(schedule);
+        match window_behavior::finish_manual_drag(&state.manual_drag_in_progress) {
+            Ok(true) => {
+                if let Err(error) = sync_main_window_mode_after_move(&app) {
+                    log::warn!("{error}");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => log::warn!("{error}"),
+        }
+        let Ok(mut schedule) = state.auto_dock_schedule.lock() else {
+            return;
+        };
+        if schedule.deadline.is_none() {
+            schedule.running = false;
             return;
         }
-
-        let is_manual_drag_active = match state.manual_drag_in_progress.lock() {
-            Ok(is_dragging) => *is_dragging,
-            Err(error) => {
-                log::warn!("failed to lock manual drag state after delay: {error}");
-                return;
-            }
-        };
-
-        if is_manual_drag_active {
-            while is_left_mouse_button_down() {
-                thread::sleep(Duration::from_millis(16));
-            }
-
-            match state.manual_drag_in_progress.lock() {
-                Ok(mut is_dragging) => {
-                    *is_dragging = false;
-                }
-                Err(error) => {
-                    log::warn!("failed to clear manual drag state after release: {error}");
-                    return;
-                }
-            }
-        }
-
-        if let Err(error) = sync_main_window_mode_after_move(&app_handle) {
-            log::warn!("{error}");
-        }
     });
+}
+
+struct WindowTransition<'a> {
+    state: &'a AppState,
+    generation: u64,
+    _lock: MutexGuard<'a, ()>,
+}
+
+fn begin_window_transition(state: &AppState) -> Result<WindowTransition<'_>, String> {
+    let generation = state.transition_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let lock = state
+        .transition_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if state.transition_generation.load(Ordering::SeqCst) != generation {
+        return Err("window transition superseded".into());
+    }
+    Ok(WindowTransition {
+        state,
+        generation,
+        _lock: lock,
+    })
+}
+
+impl WindowTransition<'_> {
+    fn check(&self) -> Result<(), String> {
+        if self.state.transition_generation.load(Ordering::SeqCst) == self.generation {
+            Ok(())
+        } else {
+            Err("window transition superseded".into())
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -1929,7 +2027,11 @@ fn apply_window_bounds_animated<R: Runtime>(
     window: &WebviewWindow<R>,
     from: StoredWindowBounds,
     to: StoredWindowBounds,
+    transition: &WindowTransition<'_>,
 ) -> Result<(), String> {
+    if transition.check().is_err() {
+        return apply_window_bounds(window, to);
+    }
     if from.x == to.x && from.y == to.y && from.width == to.width && from.height == to.height {
         return apply_window_bounds(window, to);
     }
@@ -1939,6 +2041,9 @@ fn apply_window_bounds_animated<R: Runtime>(
     );
 
     for step in 1..=WINDOW_BOUNDS_ANIMATION_STEPS {
+        if transition.check().is_err() {
+            return apply_window_bounds(window, to);
+        }
         let progress = step as f64 / WINDOW_BOUNDS_ANIMATION_STEPS as f64;
         let eased = 1.0 - (1.0 - progress).powi(3);
         let next_bounds = StoredWindowBounds {
@@ -2009,10 +2114,13 @@ fn compute_docked_bounds<R: Runtime>(
     let work_top = work_area.position.y;
     let work_right = work_left + work_area.size.width as i32;
     let work_bottom = work_top + work_area.size.height as i32;
-    let threshold = config.edge_snap_threshold_px as i32;
+    let threshold =
+        logical_px_to_physical(config.edge_snap_threshold_px, monitor.scale_factor()) as i32;
 
-    let left_gap = current_bounds.x - work_left;
-    let right_gap = work_right - (current_bounds.x + current_bounds.width as i32);
+    let inset = logical_px_to_physical(surface::SHADOW_INSET, monitor.scale_factor()) as i32;
+    let content = surface::visible_bounds(*current_bounds, inset);
+    let left_gap = content.x - work_left;
+    let right_gap = work_right - (content.x + content.width as i32);
     let near_left = left_gap <= threshold;
     let near_right = right_gap <= threshold;
 
@@ -2033,9 +2141,13 @@ fn compute_docked_bounds<R: Runtime>(
         (false, false) => return Ok(None),
     };
 
-    let exposed_width = effective_exposed_width(config) as i32;
-    let max_y = (work_bottom - current_bounds.height as i32).max(work_top);
-    let clamped_y = current_bounds.y.clamp(work_top, max_y);
+    let exposed_width =
+        logical_px_to_physical(effective_exposed_width(config), monitor.scale_factor())
+            .min(current_bounds.width)
+            .max(1) as i32;
+    let min_y = work_top - inset;
+    let max_y = (work_bottom - current_bounds.height as i32 + inset).max(min_y);
+    let clamped_y = current_bounds.y.clamp(min_y, max_y);
 
     let dock_x = match dock_side {
         DockSide::Left => work_left - (current_bounds.width as i32 - exposed_width),
@@ -2059,7 +2171,10 @@ fn compute_restore_bounds<R: Runtime>(
     dock_side: Option<DockSide>,
 ) -> Result<StoredWindowBounds, String> {
     let Some(monitor) = window
-        .current_monitor()
+        .monitor_from_point(
+            saved_bounds.x as f64 + saved_bounds.width as f64 / 2.0,
+            saved_bounds.y as f64 + saved_bounds.height as f64 / 2.0,
+        )
         .map_err(|error| format!("failed to resolve current monitor: {error}"))?
     else {
         return Ok(saved_bounds);
@@ -2070,17 +2185,11 @@ fn compute_restore_bounds<R: Runtime>(
     let work_top = work_area.position.y;
     let work_right = work_left + work_area.size.width as i32;
     let work_bottom = work_top + work_area.size.height as i32;
-    let max_y = (work_bottom - saved_bounds.height as i32).max(work_top);
-    let y = saved_bounds.y.clamp(work_top, max_y);
-
-    let x = match dock_side {
-        Some(DockSide::Left) => work_left,
-        Some(DockSide::Right) => (work_right - saved_bounds.width as i32).max(work_left),
-        None => {
-            let max_x = (work_right - saved_bounds.width as i32).max(work_left);
-            saved_bounds.x.clamp(work_left, max_x)
-        }
-    };
+    let inset = logical_px_to_physical(surface::SHADOW_INSET, monitor.scale_factor()) as i32;
+    let min_y = work_top - inset;
+    let max_y = (work_bottom - saved_bounds.height as i32 + inset).max(min_y);
+    let y = saved_bounds.y.clamp(min_y, max_y);
+    let x = surface::restore_x(dock_side, saved_bounds, work_left, work_right, inset);
 
     Ok(StoredWindowBounds {
         x,
@@ -2091,10 +2200,7 @@ fn compute_restore_bounds<R: Runtime>(
 }
 
 fn effective_exposed_width(config: &AppConfig) -> u32 {
-    config
-        .visible_handle_width_px
-        .max(config.hotzone_width_px)
-        .max(1)
+    config.visible_handle_width_px.max(1)
 }
 
 fn restore_main_window_to_normal<R: Runtime>(
@@ -2107,15 +2213,17 @@ fn restore_main_window_to_normal<R: Runtime>(
         .map_err(|error| format!("failed to lock main window state: {error}"))?
         .clone();
 
-    if runtime_state.mode == MainWindowMode::Normal {
-        return Ok(());
-    }
-
     let window = app
         .get_webview_window(WINDOW_LABEL_MAIN)
         .ok_or_else(|| String::from("main window is missing"))?;
 
+    set_window_resizable(&window, MainWindowMode::Normal.is_resizable())?;
+    if runtime_state.mode == MainWindowMode::Normal {
+        return Ok(());
+    }
     if let Some(normal_bounds) = runtime_state.normal_bounds {
+        let normal_bounds =
+            compute_restore_bounds(&window, normal_bounds, runtime_state.dock_side)?;
         apply_window_bounds(&window, normal_bounds)?;
         update_main_window_runtime_state(
             app,
@@ -2154,6 +2262,7 @@ fn update_main_window_runtime_state<R: Runtime>(
         *runtime_state = next_state.clone();
     }
 
+    surface_runtime::refresh(app, None);
     app.emit(
         EVENT_MAIN_WINDOW_MODE_CHANGED,
         MainWindowModeChangedPayload {
@@ -2162,15 +2271,6 @@ fn update_main_window_runtime_state<R: Runtime>(
         },
     )
     .map_err(|error| format!("failed to emit main window mode change: {error}"))
-}
-
-impl DockSide {
-    fn to_docked_mode(self) -> MainWindowMode {
-        match self {
-            Self::Left => MainWindowMode::DockedLeft,
-            Self::Right => MainWindowMode::DockedRight,
-        }
-    }
 }
 
 fn sanitize_note_template(note_template: &str) -> String {
@@ -2190,10 +2290,26 @@ fn format_note_block(note_text: &str, note_template: &str) -> String {
     let template = sanitize_note_template(note_template);
     let callout_text = format_callout_text(trimmed_text);
 
-    let rendered = template
-        .replace("{{timestamp}}", &timestamp)
-        .replace("{{text.callout}}", &callout_text)
-        .replace("{{text}}", trimmed_text);
+    let replacements = [
+        ("{{timestamp}}", timestamp.as_str()),
+        ("{{text.callout}}", callout_text.as_str()),
+        ("{{text}}", trimmed_text),
+    ];
+    let mut rendered = String::new();
+    let mut remaining = template.as_str();
+    while !remaining.is_empty() {
+        if let Some((placeholder, value)) = replacements
+            .iter()
+            .find(|(placeholder, _)| remaining.starts_with(placeholder))
+        {
+            rendered.push_str(value);
+            remaining = &remaining[placeholder.len()..];
+        } else {
+            let next = remaining.chars().next().unwrap();
+            rendered.push(next);
+            remaining = &remaining[next.len_utf8()..];
+        }
+    }
 
     normalize_note_block_line_endings(&rendered)
 }
@@ -2284,9 +2400,7 @@ fn current_time_millis() -> u128 {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Err(error) = show_main_window(app) {
-                log::error!("failed to activate existing instance: {error}");
-            }
+            dispatch_window_action(app, show_main_window);
         }))
         .plugin(
             tauri_plugin_log::Builder::default()
@@ -2331,6 +2445,8 @@ pub fn run() {
             };
 
             app.manage(AppState {
+                composing: AtomicBool::new(false),
+                saving: AtomicBool::new(false),
                 config: Mutex::new(config),
                 tray_menu_items,
                 active_hotkeys: Mutex::new(active_hotkeys),
@@ -2340,7 +2456,9 @@ pub fn run() {
                 draft_save_generation: Mutex::new(0),
                 native_backdrop: Mutex::new(NativeBackdropState::default()),
                 main_window_state: Mutex::new(MainWindowRuntimeState::default()),
-                auto_dock_generation: Mutex::new(0),
+                auto_dock_schedule: Mutex::new(AutoDockSchedule::default()),
+                transition_lock: Mutex::new(()),
+                transition_generation: AtomicU64::new(0),
                 manual_drag_in_progress: Mutex::new(false),
                 auto_dock_suppressed_until_ms: Mutex::new(0),
             });
@@ -2356,16 +2474,19 @@ pub fn run() {
                 update_native_backdrop(app.handle(), &main_window);
             }
 
+            native_dock::start(app.handle());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            native_dock::set_capture_interaction,
+            update_main_surface,
             get_app_config,
             get_hotkey_runtime_status,
             get_draft,
             get_native_backdrop_status,
             update_draft,
             flush_draft,
-            clear_draft,
             set_theme_mode,
             set_language_mode,
             set_target_file_path,
@@ -2378,6 +2499,9 @@ pub fn run() {
             set_note_template,
             set_custom_theme,
             save_note,
+            open_settings_window,
+            close_settings_window,
+            finish_capture,
             begin_manual_window_drag,
             end_manual_window_drag,
             is_cursor_inside_main_window,
@@ -2390,6 +2514,9 @@ pub fn run() {
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {
+        if matches!(event, RunEvent::Exit) {
+            surface_runtime::clear();
+        }
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
             let state = app_handle.state::<AppState>();
             if let Err(error) = flush_draft_inner(app_handle, &state) {
@@ -2403,6 +2530,21 @@ pub fn run() {
 mod tests {
     use super::{format_note_block, prepend_to_file};
     use std::fs;
+
+    #[test]
+    fn inserted_text_is_not_interpolated_again() {
+        assert_eq!(
+            format_note_block("literal {{text}}", "{{text.callout}}"),
+            "> literal {{text}}\r\n\r\n"
+        );
+        assert_eq!(
+            format_note_block(
+                "{{timestamp}} {{text.callout}} {{text}}",
+                "{{text}} / {{unknown}}"
+            ),
+            "{{timestamp}} {{text.callout}} {{text}} / {{unknown}}\r\n\r\n"
+        );
+    }
 
     #[test]
     fn formats_multiline_callout_content() {
