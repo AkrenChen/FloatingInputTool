@@ -188,6 +188,11 @@ pub fn load_app_config<R: Runtime>(app: &AppHandle<R>) -> Result<AppConfig, Stri
     ensure_config_help_file(app)?;
 
     let config_path = config_file_path(app)?;
+    log::info!(
+        "loading app config from {} (exists={})",
+        config_path.display(),
+        config_path.exists()
+    );
     if !config_path.exists() {
         return Ok(default_app_config(app));
     }
@@ -249,6 +254,10 @@ pub fn load_app_config<R: Runtime>(app: &AppHandle<R>) -> Result<AppConfig, Stri
         config.note_template = DEFAULT_NOTE_TEMPLATE.into();
     }
 
+    log::info!(
+        "loaded app config with {} markdown targets",
+        config.targets.len()
+    );
     Ok(config)
 }
 
