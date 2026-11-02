@@ -17,9 +17,9 @@ mod surface_runtime;
 
 use config::{
     default_app_config, load_app_config, normalize_targets, sanitize_custom_theme,
-    sanitize_targets, save_app_config, AppConfig, CustomTheme, LanguageMode, MarkdownTarget,
-    SaveShortcutMode, ThemeMode, DEFAULT_HIDE_HOTKEY, DEFAULT_HOTKEY, DEFAULT_NEXT_TARGET_HOTKEY,
-    DEFAULT_NOTE_TEMPLATE,
+    sanitize_editor_typography, sanitize_targets, save_app_config, AppConfig, CustomTheme,
+    EditorTypography, LanguageMode, MarkdownTarget, SaveShortcutMode, ThemeMode,
+    DEFAULT_HIDE_HOTKEY, DEFAULT_HOTKEY, DEFAULT_NEXT_TARGET_HOTKEY, DEFAULT_NOTE_TEMPLATE,
 };
 use draft::{load_draft, save_draft, DraftSnapshot};
 use std::sync::{
@@ -407,6 +407,26 @@ fn set_language_mode(
     app.emit(EVENT_APP_CONFIG_CHANGED, next_config.clone())
         .map_err(|error| format!("failed to emit app config change: {error}"))?;
 
+    Ok(next_config)
+}
+
+#[tauri::command]
+fn set_editor_typography(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    editor_typography: EditorTypography,
+) -> Result<AppConfig, String> {
+    let mut config = state
+        .config
+        .lock()
+        .map_err(|error| format!("failed to lock app state: {error}"))?;
+    let mut next_config = config.clone();
+    next_config.editor_typography = sanitize_editor_typography(editor_typography);
+    save_app_config(&app, &next_config)?;
+    *config = next_config.clone();
+    drop(config);
+    app.emit(EVENT_APP_CONFIG_CHANGED, next_config.clone())
+        .map_err(|error| format!("failed to emit app config change: {error}"))?;
     Ok(next_config)
 }
 
@@ -2498,6 +2518,7 @@ pub fn run() {
             set_save_shortcut_mode,
             set_note_template,
             set_custom_theme,
+            set_editor_typography,
             save_note,
             open_settings_window,
             close_settings_window,

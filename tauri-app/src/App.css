@@ -1457,3 +1457,16 @@
 @media (prefers-reduced-motion: reduce) {
   .capture-surface .dock-handle { animation: none; transition: none; }
 }
+
+.typography-fields { display: grid; gap: 14px; border: 0; padding: 0; margin: 0; min-width: 0; }
+.typography-row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+.typography-row label { display: grid; gap: 8px; min-width: 0; }
+.typography-font { flex: 1 1 200px; }
+.typography-size { flex: 0 1 100px; }
+.typography-row .settings-input { width: 100%; box-sizing: border-box; }
+.typography-fields > .settings-text-button { justify-self: start; }
+.typography-add { display: flex; gap: 8px; flex-wrap: wrap; }
+.typography-add .settings-input { flex: 1 1 180px; min-width: 0; }
+.typography-toggles { display: flex; gap: 24px; flex-wrap: wrap; }
+.typography-toggles label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.typography-preview { border: 1px solid currentColor; border-radius: 12px; padding: 16px; line-height: 1.6; overflow-wrap: anywhere; max-height: 190px; overflow: auto; }

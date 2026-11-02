@@ -1,3 +1,4 @@
+import { EditorTypographySettings } from './EditorTypographySettings'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
@@ -945,6 +946,8 @@ function SettingsApp() {
               {text.saveHotkeyHint}
             </span>
           </div>
+
+          <div hidden={activeTab !== 'appearance'}><EditorTypographySettings language={languageMode} /></div>
 
           <div className="settings-section" hidden={activeTab !== 'appearance'}>
             <div className="settings-label-row">

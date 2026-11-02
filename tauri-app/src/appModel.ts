@@ -1,3 +1,11 @@
+export type EditorTypography = {
+  fontFamily: string
+  fontSizePx: number
+  bold: boolean
+  italic: boolean
+  customFonts: string[]
+}
+
 export type ThemeMode = 'follow-system' | 'theme-white' | 'theme-dark' | 'custom'
 export type ResolvedTheme = 'white' | 'dark' | 'custom'
 export type FeedbackTone = 'normal' | 'error'
@@ -37,6 +45,7 @@ export type AppConfig = {
   saveShortcutTextColor: string
   saveShortcutFontSizePx: number
   customTheme: CustomTheme
+  editorTypography: EditorTypography
   noteTemplate: string
   languageMode: LanguageMode
 }

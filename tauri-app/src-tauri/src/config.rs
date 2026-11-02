@@ -100,6 +100,42 @@ impl Default for MarkdownTarget {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct EditorTypography {
+    pub font_family: String,
+    pub font_size_px: u32,
+    pub bold: bool,
+    pub italic: bool,
+    pub custom_fonts: Vec<String>,
+}
+
+impl Default for EditorTypography {
+    fn default() -> Self {
+        Self {
+            font_family: String::new(),
+            font_size_px: 15,
+            bold: false,
+            italic: false,
+            custom_fonts: Vec::new(),
+        }
+    }
+}
+
+pub fn sanitize_editor_typography(mut value: EditorTypography) -> EditorTypography {
+    value.font_family = value.font_family.trim().to_string();
+    value.font_size_px = value.font_size_px.clamp(10, 48);
+    let mut fonts: Vec<String> = Vec::new();
+    for font in value.custom_fonts {
+        let font = font.trim();
+        if !font.is_empty() && !fonts.iter().any(|item| item.eq_ignore_ascii_case(font)) {
+            fonts.push(font.to_string());
+        }
+    }
+    value.custom_fonts = fonts;
+    value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -135,6 +171,8 @@ pub struct AppConfig {
     pub save_shortcut_font_size_px: u32,
     #[serde(default)]
     pub custom_theme: CustomTheme,
+    #[serde(default)]
+    pub editor_typography: EditorTypography,
     #[serde(default)]
     pub targets: Vec<MarkdownTarget>,
     #[serde(default = "default_target_id")]
@@ -206,6 +244,7 @@ pub fn load_app_config<R: Runtime>(app: &AppHandle<R>) -> Result<AppConfig, Stri
         config.save_shortcut_font_size_px = DEFAULT_SAVE_SHORTCUT_FONT_SIZE_PX;
     }
     normalize_custom_theme(&mut config.custom_theme);
+    config.editor_typography = sanitize_editor_typography(config.editor_typography);
     if config.note_template.trim().is_empty() {
         config.note_template = DEFAULT_NOTE_TEMPLATE.into();
     }
@@ -298,6 +337,7 @@ pub fn default_app_config<R: Runtime>(app: &AppHandle<R>) -> AppConfig {
         save_shortcut_text_color: DEFAULT_SAVE_SHORTCUT_TEXT_COLOR.into(),
         save_shortcut_font_size_px: DEFAULT_SAVE_SHORTCUT_FONT_SIZE_PX,
         custom_theme: CustomTheme::default(),
+        editor_typography: EditorTypography::default(),
         targets: vec![MarkdownTarget {
             id: DEFAULT_TARGET_ID.into(),
             nickname: DEFAULT_TARGET_NICKNAME.into(),
@@ -681,3 +721,32 @@ Values:
 - `1`: visible.
 - `0`: hidden.
 "#;
+
+#[cfg(test)]
+mod typography_tests {
+    use super::*;
+
+    #[test]
+    fn old_config_keeps_existing_editor_appearance() {
+        let config: AppConfig = serde_json::from_str(r#"{"themeMode":"follow-system"}"#).unwrap();
+        assert_eq!(config.editor_typography, EditorTypography::default());
+    }
+
+    #[test]
+    fn typography_survives_config_round_trip() {
+        let mut config: AppConfig =
+            serde_json::from_str(r#"{"themeMode":"follow-system"}"#).unwrap();
+        config.editor_typography = sanitize_editor_typography(EditorTypography {
+            font_family: " Custom Font ".into(),
+            font_size_px: 22,
+            bold: true,
+            italic: true,
+            custom_fonts: vec![" Custom Font ".into(), "custom font".into(), "".into()],
+        });
+        let restored: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.editor_typography, config.editor_typography);
+        assert_eq!(restored.editor_typography.custom_fonts, vec!["Custom Font"]);
+        assert_eq!(restored.editor_typography.font_family, "Custom Font");
+    }
+}

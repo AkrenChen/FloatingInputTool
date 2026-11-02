@@ -1,3 +1,4 @@
+import { editorTypographyStyle } from './editorTypography'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { invoke } from '@tauri-apps/api/core'
@@ -814,6 +815,7 @@ function App() {
 
             <div className="editor-shell">
               <textarea
+                style={editorTypographyStyle(appConfig?.editorTypography, appConfig?.languageMode)}
                 id="fleeting-note-editor"
                 name="fleeting-note-editor"
                 ref={textareaRef}
