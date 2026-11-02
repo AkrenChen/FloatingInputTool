@@ -145,3 +145,10 @@ Acceptance wording: first hover after dragging to dock, click editor and keep ex
 - [x] Remove temporary Settings tuning UI and unused preview plumbing; keep shared defaults.
 - [x] Fresh frontend lint/build/tests and Rust fmt/tests checks.
 - [ ] Refresh candidate, commit reviewed source/docs and push codex/experience-fixes as authorized.
+
+## 2026-11-02 Shadow input isolation (authorized)
+Goal: shadow pixels must never intercept lower applications; preserve focus material, 24%/10% shadow, dock and resize.
+- [x] Move capture HWND/CSS/layout to visible panel dimensions (560x360); keep docking coordinates consistent.
+- [x] Render an independent layered, transparent, nonactivating shadow host; synchronize visibility, move, size, DPI and destruction.
+- [x] Verify native hit testing on all four sides, focus, resize, left/right dock and hide using isolated candidate.
+- [x] Run frontend/Rust checks, update acceptance record and report remaining limits.

@@ -138,7 +138,7 @@ fn refresh_on_ui<R: Runtime>(app: &AppHandle<R>, request: Option<SurfaceRequest>
             inset: if docked {
                 0
             } else {
-                crate::surface::SHADOW_INSET
+                crate::surface::CAPTURE_INSET
             },
             applied: result.ok(),
         },
@@ -154,7 +154,7 @@ fn refresh_on_ui<R: Runtime>(app: &AppHandle<R>, _request: Option<SurfaceRequest
             focused: true,
             active: true,
             interface_opacity: 1.0,
-            inset: 72,
+            inset: 0,
         },
     );
 }

@@ -129,3 +129,7 @@ The main capture window now uses Windows.UI.Composition for desktop blur, tint, 
 The temporary tuning panel has been removed from Settings after parameters were finalized. Normal custom-theme controls remain. Native observation controls edge hover/collapse without relying on inactive WebView timers; completion of a drag is consumed once so the first editor click after hover expansion cannot repeat edge docking.
 
 User desktop checks confirmed outside/inactive collapse, removal of docked gray areas and stable first-hover/editor-click behavior on the tested Windows11 machine. Transparent shadow-margin click-through, cross-machine/high-DPI/IME/endurance validation remain open. The independent experiment under `experiments/composition-probe` preserves the earlier feasibility work and its own parameter snapshot.
+
+### Shadow input isolation (2026-11-02)
+
+The capture HWND now matches the visible 560x360 panel (minimum 520x320). Shadow padding lives only in a separate layered native window using WS_EX_TRANSPARENT and WS_EX_NOACTIVATE. It follows the capture window and hides with it or when docked. Focused/idle shadow opacity remains 24%/10%; the glass background and text opacity stay independent. Shadow rendering uses a cached hollow rounded bitmap with a separable blur, so focus changes only update alpha. The previous 72px transparent input margin has been removed; Windows retains its normal thin resize hit area. User desktop acceptance passed lower-window clicks through the shadow, resize and dock collapse/hover expansion.

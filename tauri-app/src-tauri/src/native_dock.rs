@@ -55,7 +55,7 @@ pub(crate) fn start<R: Runtime>(app: &AppHandle<R>) {
                     Ok(value) => value.clone(),
                     Err(_) => break,
                 };
-                let inset = logical_px_to_physical(surface::SHADOW_INSET, scale) as i32;
+                let inset = logical_px_to_physical(surface::CAPTURE_INSET, scale) as i32;
                 let pointer_bounds = if runtime.mode.is_docked() {
                     let width =
                         logical_px_to_physical(config.visible_handle_width_px, scale).max(1);

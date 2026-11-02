@@ -87,3 +87,6 @@ User reports: outside + foreground another app fails to collapse until clicking 
 
 ## First hover/editor click collapse regression
 User repro: after dragging to dock, first hover expansion retains focus; first editor click collapses; next expansion/click succeeds. Code trace identifies native scheduler clears backend drag bool and syncs geometry, but frontend manualDragActiveRef remains armed until a subsequent mouseup. end_manual_window_drag unconditionally re-runs edge docking even though native drag completion already ran. Movement scheduler also syncs for programmatic/non-drag Moved events. Fix consumes one shared backend drag completion, skips duplicates/non-drag movement, and clears frontend drag ref on docked state acknowledgement. Regression test for native-settle then editor-mouseup sequence observed failing before helper implementation.
+
+## 2026-11-02 Shadow interception
+Confirmed source: the main HWND includes 72 logical px on every side and transparent CSS does not remove input ownership. Existing visible panel resize handles already use Tauri startResizeDragging. Earlier region-clipping experiments were unstable with hidden native frames, so this implementation reduces the capture HWND itself rather than applying another region. Keep 72px exclusively in a separate layered shadow HWND with WS_EX_TRANSPARENT and WS_EX_NOACTIVATE.

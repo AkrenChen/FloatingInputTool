@@ -11,6 +11,9 @@ mod native_composition;
 mod native_dock;
 #[cfg(windows)]
 mod native_effects;
+#[cfg(windows)]
+mod native_shadow;
+mod shadow_bitmap;
 mod storage;
 mod surface;
 mod surface_runtime;
@@ -853,7 +856,7 @@ fn is_cursor_inside_main_window(app: AppHandle, padding_px: Option<i32>) -> Resu
     if !docked {
         bounds = surface::visible_bounds(
             bounds,
-            logical_px_to_physical(surface::SHADOW_INSET, scale) as i32,
+            logical_px_to_physical(surface::CAPTURE_INSET, scale) as i32,
         );
     }
     let padding = logical_px_to_physical(padding_px.unwrap_or(0).max(0) as u32, scale) as i32;
@@ -2137,7 +2140,7 @@ fn compute_docked_bounds<R: Runtime>(
     let threshold =
         logical_px_to_physical(config.edge_snap_threshold_px, monitor.scale_factor()) as i32;
 
-    let inset = logical_px_to_physical(surface::SHADOW_INSET, monitor.scale_factor()) as i32;
+    let inset = logical_px_to_physical(surface::CAPTURE_INSET, monitor.scale_factor()) as i32;
     let content = surface::visible_bounds(*current_bounds, inset);
     let left_gap = content.x - work_left;
     let right_gap = work_right - (content.x + content.width as i32);
@@ -2205,7 +2208,7 @@ fn compute_restore_bounds<R: Runtime>(
     let work_top = work_area.position.y;
     let work_right = work_left + work_area.size.width as i32;
     let work_bottom = work_top + work_area.size.height as i32;
-    let inset = logical_px_to_physical(surface::SHADOW_INSET, monitor.scale_factor()) as i32;
+    let inset = logical_px_to_physical(surface::CAPTURE_INSET, monitor.scale_factor()) as i32;
     let min_y = work_top - inset;
     let max_y = (work_bottom - saved_bounds.height as i32 + inset).max(min_y);
     let y = saved_bounds.y.clamp(min_y, max_y);

@@ -16,10 +16,9 @@ use windows::{
     UI::{
         Color,
         Composition::{
-            CompositionColorBrush, CompositionDropShadowSourcePolicy,
-            CompositionEffectSourceParameter, CompositionRoundedRectangleGeometry,
-            CompositionVisualSurface, Compositor, ContainerVisual, Desktop::DesktopWindowTarget,
-            DropShadow, ShapeVisual, SpriteVisual,
+            CompositionColorBrush, CompositionEffectSourceParameter,
+            CompositionRoundedRectangleGeometry, Compositor, ContainerVisual,
+            Desktop::DesktopWindowTarget, SpriteVisual,
         },
     },
 };
@@ -45,11 +44,10 @@ pub struct Scene {
     blur: SpriteVisual,
     tint: SpriteVisual,
     tint_brush: CompositionColorBrush,
-    shape: ShapeVisual,
     geometry: CompositionRoundedRectangleGeometry,
-    shadow_layer: SpriteVisual,
-    shadow_surface: CompositionVisualSurface,
-    shadow: DropShadow,
+    shadow_host: crate::native_shadow::ShadowHost,
+    shadow_blur: f32,
+    shadow_opacity: f32,
     deviation: f32,
     size: Vector2,
     scale: f32,
@@ -95,30 +93,9 @@ impl Scene {
         _target.SetRoot(&_root)?;
 
         let geometry = compositor.CreateRoundedRectangleGeometry()?;
-        let rounded_shape = compositor.CreateSpriteShapeWithGeometry(&geometry)?;
-        rounded_shape.SetFillBrush(&compositor.CreateColorBrushWithColor(Color {
-            A: 255,
-            R: 255,
-            G: 255,
-            B: 255,
-        })?)?;
-        let shape = compositor.CreateShapeVisual()?;
-        shape.Shapes()?.Append(&rounded_shape)?;
-        let shadow_surface = compositor.CreateVisualSurface()?;
-        shadow_surface.SetSourceVisual(&shape)?;
-        let shadow_mask = compositor.CreateSurfaceBrushWithSurface(&shadow_surface)?;
-        let shadow_layer = compositor.CreateSpriteVisual()?;
-        let shadow = compositor.CreateDropShadow()?;
-        shadow.SetColor(Color {
-            A: 255,
-            R: 0,
-            G: 0,
-            B: 0,
+        let shadow_host = crate::native_shadow::ShadowHost::new(hwnd.0).map_err(|error| {
+            windows::core::Error::new(windows::core::HRESULT(0x80004005u32 as i32), error)
         })?;
-        shadow.SetSourcePolicy(CompositionDropShadowSourcePolicy::Default)?;
-        shadow.SetMask(&shadow_mask)?;
-        shadow_layer.SetShadow(&shadow)?;
-        _root.Children()?.InsertAtTop(&shadow_layer)?;
 
         let content = compositor.CreateContainerVisual()?;
         let clip = compositor.CreateGeometricClipWithGeometry(&geometry)?;
@@ -139,11 +116,10 @@ impl Scene {
             blur,
             tint,
             tint_brush,
-            shape,
             geometry,
-            shadow_layer,
-            shadow_surface,
-            shadow,
+            shadow_host,
+            shadow_blur: 0.0,
+            shadow_opacity: 0.0,
             deviation: -1.0,
             size: Vector2::default(),
             scale,
@@ -167,9 +143,7 @@ impl Scene {
         for visual in [&self.blur, &self.tint] {
             visual.SetSize(self.size)?;
         }
-        self.shape.SetSize(self.size)?;
-        self.shadow_surface.SetSourceSize(self.size)?;
-        self.shadow_layer.SetSize(self.size)?;
+
         self.content.SetSize(self.size)?;
         let offset = Vector3 {
             X: margin,
@@ -177,7 +151,7 @@ impl Scene {
             Z: 0.0,
         };
         self.content.SetOffset(offset)?;
-        self.shadow_layer.SetOffset(offset)?;
+
         Ok(())
     }
 
@@ -215,21 +189,17 @@ impl Scene {
             G: self.tint_color[1],
             B: self.tint_color[2],
         })?;
-        self.shadow
-            .SetBlurRadius(parameters.shadow_blur * self.scale)?;
-        self.shadow.SetOpacity(1.0)?;
-        let shadow_opacity = if active {
+        self.shadow_host
+            .update(parameters, active, self.scale)
+            .map_err(|error| {
+                windows::core::Error::new(windows::core::HRESULT(0x80004005u32 as i32), error)
+            })?;
+        self.shadow_blur = parameters.shadow_blur;
+        self.shadow_opacity = if active {
             parameters.shadow_opacity
         } else {
             parameters.idle_shadow_opacity
         };
-        self.shadow_layer.SetOpacity(shadow_opacity)?;
-        self.shadow_layer.SetIsVisible(shadow_opacity > 0.0)?;
-        self.shadow.SetOffset(Vector3 {
-            X: 0.0,
-            Y: parameters.shadow_y * self.scale,
-            Z: 0.0,
-        })?;
         self.geometry.SetCornerRadius(Vector2 {
             X: parameters.corner_radius * self.scale,
             Y: parameters.corner_radius * self.scale,
@@ -255,8 +225,8 @@ impl Scene {
             tint: self.tint_brush.Color()?.A as f32 / 255.0,
             interface_opacity: self.interface_opacity,
             material_opacity: self.content.Opacity()?,
-            shadow_blur: self.shadow.BlurRadius()? / self.scale,
-            shadow_opacity: self.shadow_layer.Opacity()?,
+            shadow_blur: self.shadow_blur,
+            shadow_opacity: self.shadow_opacity,
         })
     }
 
@@ -264,7 +234,8 @@ impl Scene {
         self.tint_color = color;
     }
 
-    pub fn set_docked(&self, docked: bool) -> Result<()> {
+    pub fn set_docked(&mut self, docked: bool) -> Result<()> {
+        self.shadow_host.set_docked(docked);
         self._root.SetIsVisible(!docked)
     }
 }

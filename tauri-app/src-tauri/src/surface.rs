@@ -1,6 +1,7 @@
 use crate::window_behavior::{DockSide, StoredWindowBounds};
 
 pub const SHADOW_INSET: u32 = 72;
+pub const CAPTURE_INSET: u32 = 0;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,7 +74,7 @@ impl SurfaceEffects {
 }
 
 pub fn content_bounds(width: f32, height: f32, scale: f32) -> (f32, f32, f32) {
-    let inset = SHADOW_INSET as f32 * scale;
+    let inset = CAPTURE_INSET as f32 * scale;
     (
         inset,
         (width - 2.0 * inset).max(1.0),
@@ -110,14 +111,14 @@ pub fn restore_x(
 mod tests {
     use super::*;
     #[test]
-    fn shadow_inset_preserves_capture_size_and_docked_restore_edges() {
+    fn capture_bounds_match_visible_panel_and_docked_restore_edges() {
         for scale in [1, 2] {
-            let inset = SHADOW_INSET as i32 * scale;
+            let inset = CAPTURE_INSET as i32 * scale;
             let outer = StoredWindowBounds {
                 x: -1920 - inset,
                 y: -inset,
-                width: 704 * scale as u32,
-                height: 504 * scale as u32,
+                width: 560 * scale as u32,
+                height: 360 * scale as u32,
             };
             let visible = visible_bounds(outer, inset);
             assert_eq!(

@@ -1374,7 +1374,7 @@
 }
 .capture-surface > .floating-window {
   position: absolute;
-  inset: 72px;
+  inset: 0;
   width: auto;
   height: auto;
   border-radius: var(--window-radius);
@@ -1408,7 +1408,7 @@
 .resize-northwest { top: 0; left: 0; cursor: nwse-resize; }
 .resize-southeast { bottom: 0; right: 0; cursor: nwse-resize; }
 .resize-southwest { bottom: 0; left: 0; cursor: nesw-resize; }
-.capture-surface.is-docked .dock-shell { position: absolute; top: 72px; bottom: 72px; height: auto; }
+.capture-surface.is-docked .dock-shell { position: absolute; top: 0; bottom: 0; height: auto; }
 .capture-surface.is-docked > .floating-window {
   background: transparent;
   border: 0;
