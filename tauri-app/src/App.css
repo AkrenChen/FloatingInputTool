@@ -290,7 +290,14 @@
 
 .editor-shell textarea::placeholder {
   color: var(--empty-input-placeholder-color);
-  font-style: italic;
+  font-family: 'Segoe UI', 'Segoe UI Variable', system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 400;
+  font-style: normal;
+}
+
+.lang-chinese .editor-shell textarea::placeholder {
+  font-family: SimHei, 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
 }
 
 .theme-white .editor-shell textarea {
