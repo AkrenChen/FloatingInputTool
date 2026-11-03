@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import type { AppConfig, EditorTypography, LanguageMode } from './appModel'
+import type { AppConfig, EditorTypography, LanguageMode, ResolvedTheme } from './appModel'
 import { defaultEditorTypography, editorTypographyStyle, suggestedFonts } from './editorTypography'
 
-export function EditorTypographySettings({ language }: { language: LanguageMode }) {
+export function EditorTypographySettings({ language, theme }: { language: LanguageMode; theme: ResolvedTheme }) {
   const zh = language === 'chinese'
   const [draft, setDraft] = useState(defaultEditorTypography)
   const [saved, setSaved] = useState(defaultEditorTypography)
@@ -16,6 +16,9 @@ export function EditorTypographySettings({ language }: { language: LanguageMode 
   const [feedback, setFeedback] = useState('')
   const [error, setError] = useState(false)
   const dirty = useRef(false)
+  const colorKey = theme === 'dark' ? 'textColorDark' : theme === 'white' ? 'textColorWhite' : 'textColor'
+  const currentColor = draft[colorKey]
+  const defaultColor = defaultEditorTypography[colorKey]
 
   useEffect(() => {
     let active = true
@@ -78,7 +81,7 @@ export function EditorTypographySettings({ language }: { language: LanguageMode 
     <span className="settings-label">{zh ? '正文样式' : 'Editor typography'}</span>
     <span className="settings-inline-value">{zh ? '仅影响输入框显示，不改变保存的 Markdown 内容。' : 'Only changes the editor display, not the saved Markdown.'}</span>
     <fieldset disabled={loading || saving} className="typography-fields">
-      <div className="typography-preview" style={editorTypographyStyle(draft, language)} aria-label={zh ? '正文预览' : 'Editor preview'}>
+      <div className="typography-preview" style={editorTypographyStyle(draft, language, theme)} aria-label={zh ? '正文预览' : 'Editor preview'}>
         记录一闪而过的灵感。<br />Capture a fleeting thought. 0123456789
       </div>
       <div className="typography-row">
@@ -115,6 +118,17 @@ export function EditorTypographySettings({ language }: { language: LanguageMode 
         <label><input type="checkbox" checked={draft.bold} onChange={event => update({ bold: event.target.checked })} />{zh ? '固定粗体' : 'Always bold'}</label>
         <label><input type="checkbox" checked={draft.italic} onChange={event => update({ italic: event.target.checked })} />{zh ? '固定斜体' : 'Always italic'}</label>
       </div>
+      <div className="typography-color">
+        <label>
+          <span className="settings-label">{zh ? '正文颜色' : 'Text color'}</span>
+          <input type="color" aria-label={zh ? '选择正文颜色' : 'Choose text color'}
+            value={currentColor || '#333333'} onChange={event => update({ [colorKey]: event.target.value })} />
+        </label>
+        <span className="settings-inline-value">{currentColor || (zh ? '跟随主题' : 'Follow theme')}</span>
+        <button type="button" className="settings-text-button" disabled={currentColor?.toLowerCase() === defaultColor.toLowerCase()}
+          onClick={() => update({ [colorKey]: defaultColor })}>{zh ? '恢复默认' : 'Reset color'}</button>
+      </div>
+      <span className="settings-inline-value">{zh ? '颜色按当前主题分别保存，切换主题后可设置另一种颜色。' : 'Colors are saved per theme. Switch themes to edit the other color.'}</span>
       <div className="settings-actions">
         <button type="button" className="settings-save-button" onClick={() => void save()}>{saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存正文样式' : 'Save editor style')}</button>
         <button type="button" className="settings-save-button is-secondary" onClick={() => {

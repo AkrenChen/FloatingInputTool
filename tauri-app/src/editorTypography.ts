@@ -1,8 +1,9 @@
 import type { CSSProperties } from 'react'
-import type { EditorTypography, LanguageMode } from './appModel'
+import type { EditorTypography, LanguageMode, ResolvedTheme } from './appModel'
 
 export const defaultEditorTypography: EditorTypography = {
-  fontFamily: '', fontSizePx: 15, bold: false, italic: false, customFonts: [],
+  fontFamily: '', fontSizePx: 15, bold: false, italic: false, customFonts: [], textColor: '',
+  textColorWhite: '#4c4f69', textColorDark: '#cfd2da',
 }
 
 export const suggestedFonts = [
@@ -13,6 +14,7 @@ export const suggestedFonts = [
 export function editorTypographyStyle(
   value: EditorTypography = defaultEditorTypography,
   language: LanguageMode = 'english',
+  theme: ResolvedTheme = 'white',
 ): CSSProperties {
   const fallback = language === 'chinese'
     ? 'SimHei, "Microsoft YaHei", "Noto Sans SC", sans-serif'
@@ -25,5 +27,8 @@ export function editorTypographyStyle(
     fontWeight: value.bold ? 700 : 400,
     fontStyle: value.italic ? 'italic' : 'normal',
     fontSynthesis: 'weight style',
+    color: theme === 'custom' ? value.textColor || undefined
+      : theme === 'dark' ? value.textColorDark || defaultEditorTypography.textColorDark
+      : value.textColorWhite || defaultEditorTypography.textColorWhite,
   }
 }

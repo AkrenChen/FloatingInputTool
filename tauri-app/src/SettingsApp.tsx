@@ -947,7 +947,7 @@ function SettingsApp() {
             </span>
           </div>
 
-          <div hidden={activeTab !== 'appearance'}><EditorTypographySettings language={languageMode} /></div>
+          <div hidden={activeTab !== 'appearance'}><EditorTypographySettings language={languageMode} theme={resolvedTheme} /></div>
 
           <div className="settings-section" hidden={activeTab !== 'appearance'}>
             <div className="settings-label-row">

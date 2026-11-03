@@ -108,6 +108,19 @@ pub struct EditorTypography {
     pub bold: bool,
     pub italic: bool,
     pub custom_fonts: Vec<String>,
+    pub text_color: String,
+    #[serde(default = "default_editor_white_color")]
+    pub text_color_white: String,
+    #[serde(default = "default_editor_dark_color")]
+    pub text_color_dark: String,
+}
+
+fn default_editor_white_color() -> String {
+    "#4c4f69".into()
+}
+
+fn default_editor_dark_color() -> String {
+    "#cfd2da".into()
 }
 
 impl Default for EditorTypography {
@@ -118,6 +131,9 @@ impl Default for EditorTypography {
             bold: false,
             italic: false,
             custom_fonts: Vec::new(),
+            text_color: String::new(),
+            text_color_white: default_editor_white_color(),
+            text_color_dark: default_editor_dark_color(),
         }
     }
 }
@@ -125,6 +141,11 @@ impl Default for EditorTypography {
 pub fn sanitize_editor_typography(mut value: EditorTypography) -> EditorTypography {
     value.font_family = value.font_family.trim().to_string();
     value.font_size_px = value.font_size_px.clamp(10, 48);
+    value.text_color = sanitize_editor_color(&value.text_color, "");
+    value.text_color_white =
+        sanitize_editor_color(&value.text_color_white, &default_editor_white_color());
+    value.text_color_dark =
+        sanitize_editor_color(&value.text_color_dark, &default_editor_dark_color());
     let mut fonts: Vec<String> = Vec::new();
     for font in value.custom_fonts {
         let font = font.trim();
@@ -134,6 +155,18 @@ pub fn sanitize_editor_typography(mut value: EditorTypography) -> EditorTypograp
     }
     value.custom_fonts = fonts;
     value
+}
+
+fn sanitize_editor_color(color: &str, fallback: &str) -> String {
+    let color = color.trim();
+    if color.len() == 7
+        && color.starts_with('#')
+        && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+    {
+        color.to_ascii_uppercase()
+    } else {
+        fallback.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -739,6 +772,14 @@ mod typography_tests {
     fn old_config_keeps_existing_editor_appearance() {
         let config: AppConfig = serde_json::from_str(r#"{"themeMode":"follow-system"}"#).unwrap();
         assert_eq!(config.editor_typography, EditorTypography::default());
+        let legacy: EditorTypography = serde_json::from_str(
+            r#"{"fontFamily":"Consolas","fontSizePx":18,"bold":true,"italic":false,"customFonts":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.text_color, "");
+        assert_eq!(legacy.font_family, "Consolas");
+        assert_eq!(legacy.text_color_white, "#4c4f69");
+        assert_eq!(legacy.text_color_dark, "#cfd2da");
     }
 
     #[test]
@@ -751,11 +792,17 @@ mod typography_tests {
             bold: true,
             italic: true,
             custom_fonts: vec![" Custom Font ".into(), "custom font".into(), "".into()],
+            text_color: "#a1b2c3".into(),
+            text_color_white: "#4c4f69".into(),
+            text_color_dark: "#cfd2da".into(),
         });
         let restored: AppConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert_eq!(restored.editor_typography, config.editor_typography);
         assert_eq!(restored.editor_typography.custom_fonts, vec!["Custom Font"]);
         assert_eq!(restored.editor_typography.font_family, "Custom Font");
+        assert_eq!(restored.editor_typography.text_color, "#A1B2C3");
+        assert_eq!(restored.editor_typography.text_color_white, "#4C4F69");
+        assert_eq!(restored.editor_typography.text_color_dark, "#CFD2DA");
     }
 }

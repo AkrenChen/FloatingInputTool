@@ -4,6 +4,9 @@ export type EditorTypography = {
   bold: boolean
   italic: boolean
   customFonts: string[]
+  textColor: string
+  textColorWhite: string
+  textColorDark: string
 }
 
 export type ThemeMode = 'follow-system' | 'theme-white' | 'theme-dark' | 'custom'

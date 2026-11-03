@@ -815,7 +815,7 @@ function App() {
 
             <div className="editor-shell">
               <textarea
-                style={editorTypographyStyle(appConfig?.editorTypography, appConfig?.languageMode)}
+                style={editorTypographyStyle(appConfig?.editorTypography, appConfig?.languageMode, resolvedTheme)}
                 id="fleeting-note-editor"
                 name="fleeting-note-editor"
                 ref={textareaRef}
